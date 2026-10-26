@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from typing import TypeVar
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session
 from app.api.agent_schemas import (
     AgentTaskApproval,
     AgentTaskCreate,
+    AgentTaskPlanRequest,
     AgentTaskRerun,
+    AgentTaskSearchRequest,
     AgentTaskResponse,
     AgentTaskTraceResponse,
     AgentTraceEventResponse,
@@ -20,9 +22,16 @@ from app.api.agent_schemas import (
     TaskStatus,
     ToolCatalogItem,
 )
+from app.core.config import Settings, get_settings
 from app.database import get_db
+from app.core.security import require_authenticated
 from app.models import AgentTask, Skill, utc_now
-from app.services.agent_runtime import AgentRuntimeError, create_task, decide_task_approval
+from app.services.agent_runtime import (
+    AgentRuntimeError,
+    create_model_planned_task,
+    create_task,
+    decide_task_approval,
+)
 from app.services.tool_registry import (
     InvalidToolInputError,
     UnknownToolError,
@@ -32,8 +41,16 @@ from app.services.tool_registry import (
 )
 
 
-router = APIRouter(prefix="/api/agent", tags=["agent"])
-skills_router = APIRouter(prefix="/api/agent/skills", tags=["skills"])
+router = APIRouter(
+    prefix="/api/agent",
+    tags=["agent"],
+    dependencies=[Depends(require_authenticated)],
+)
+skills_router = APIRouter(
+    prefix="/api/agent/skills",
+    tags=["skills"],
+    dependencies=[Depends(require_authenticated)],
+)
 Result = TypeVar("Result")
 
 
@@ -108,17 +125,65 @@ def submit_task(
     return AgentTaskResponse.model_validate(task)
 
 
+@router.post(
+    "/tasks/plan",
+    response_model=AgentTaskResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def submit_model_planned_task(
+    request: AgentTaskPlanRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> AgentTaskResponse:
+    """Persist a model planning attempt, then execute only locally validated tools."""
+    try:
+        task = await create_model_planned_task(db, request, settings)
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.public_message) from None
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Local agent storage is unavailable.",
+        ) from None
+    return AgentTaskResponse.model_validate(task)
+
+
 @router.get("/tasks", response_model=list[AgentTaskResponse])
 def list_tasks(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    q: str | None = Query(default=None, min_length=1, max_length=120),
     task_status: TaskStatus | None = Query(default=None, alias="status"),
     db: Session = Depends(get_db),
 ) -> list[AgentTaskResponse]:
-    """Search and list persisted tasks for the local history view, newest first."""
+    """List persisted tasks; private text searches use POST /tasks/search."""
+    if "q" in request.query_params:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Send history search text in the POST /api/agent/tasks/search body.",
+        )
+
     statement = select(AgentTask)
-    query = q.strip() if q else ""
+    if task_status:
+        statement = statement.where(AgentTask.status == task_status)
+    statement = statement.order_by(AgentTask.created_at.desc(), AgentTask.id.desc())
+    statement = statement.offset(offset).limit(limit)
+    tasks = _database_operation(
+        db,
+        lambda: db.scalars(statement).all(),
+    )
+    return [AgentTaskResponse.model_validate(task) for task in tasks]
+
+
+@router.post("/tasks/search", response_model=list[AgentTaskResponse])
+def search_tasks(
+    request: AgentTaskSearchRequest,
+    db: Session = Depends(get_db),
+) -> list[AgentTaskResponse]:
+    """Search and filter persisted history without placing task text in the URL."""
+    statement = select(AgentTask)
+    query = request.q or ""
     if query:
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = f"%{escaped}%"
@@ -128,14 +193,11 @@ def list_tasks(
                 AgentTask.result_summary.ilike(pattern, escape="\\"),
             )
         )
-    if task_status:
-        statement = statement.where(AgentTask.status == task_status)
+    if request.status:
+        statement = statement.where(AgentTask.status == request.status)
     statement = statement.order_by(AgentTask.created_at.desc(), AgentTask.id.desc())
-    statement = statement.offset(offset).limit(limit)
-    tasks = _database_operation(
-        db,
-        lambda: db.scalars(statement).all(),
-    )
+    statement = statement.offset(request.offset).limit(request.limit)
+    tasks = _database_operation(db, lambda: db.scalars(statement).all())
     return [AgentTaskResponse.model_validate(task) for task in tasks]
 
 
@@ -170,10 +232,11 @@ def get_task_trace(
     response_model=AgentTaskResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def rerun_task(
+async def rerun_task(
     request: AgentTaskRerun,
     task_id: int = Path(gt=0),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> AgentTaskResponse:
     """Create a new run from a saved task; never resume old in-memory execution."""
     source = _database_operation(db, lambda: db.get(AgentTask, task_id))
@@ -192,6 +255,7 @@ def rerun_task(
             detail="This task has no saved plan that can be run again.",
         )
 
+    model_planned = any(event.event_type == "planner_started" for event in source.trace_events)
     if source.skill_id is not None:
         skill = _database_operation(db, lambda: db.get(Skill, source.skill_id))
         if skill is None or skill.status != "approved":
@@ -200,6 +264,8 @@ def rerun_task(
                 detail="The source skill is no longer approved and cannot be run again.",
             )
         tool_names = [step.get("tool_name") for step in skill.steps]
+    elif model_planned:
+        tool_names = [step.get("tool_name") for step in plan]
     elif len(plan) == 1:
         tool_names = [plan[0].get("tool_name")]
     else:
@@ -227,6 +293,24 @@ def rerun_task(
             task_input=source.task_input,
             skill_id=source.skill_id,
         )
+    elif model_planned:
+        rerun_request = AgentTaskPlanRequest(task_input=source.task_input)
+        try:
+            task = await create_model_planned_task(
+                db,
+                rerun_request,
+                settings,
+                rerun_from_task_id=source.id,
+            )
+        except AgentRuntimeError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.public_message) from None
+        except SQLAlchemyError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Local agent storage is unavailable.",
+            ) from None
+        return AgentTaskResponse.model_validate(task)
     elif len(plan) == 1:
         rerun_request = AgentTaskCreate(
             task_input=source.task_input,

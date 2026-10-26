@@ -8,13 +8,18 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.api.memory_schemas import MemoryCreate, MemoryResponse, MemoryUpdate
+from app.api.memory_schemas import MemoryCreate, MemoryResponse, MemorySearchRequest, MemoryUpdate
 from app.database import get_db
+from app.core.security import require_authenticated
 from app.models import Memory, utc_now
 from app.services.memory_search import search_memory_rows
 
 
-router = APIRouter(prefix="/api/memories", tags=["memory"])
+router = APIRouter(
+    prefix="/api/memories",
+    tags=["memory"],
+    dependencies=[Depends(require_authenticated)],
+)
 Result = TypeVar("Result")
 
 
@@ -44,20 +49,16 @@ def _memory_sort():
     return (Memory.updated_at.desc(), Memory.id.desc())
 
 
-@router.get("/search", response_model=list[MemoryResponse])
+@router.post("/search", response_model=list[MemoryResponse])
 def search_memories(
-    q: str = Query(min_length=1, max_length=100),
-    limit: int = Query(default=50, ge=1, le=200),
+    request: MemorySearchRequest,
     db: Session = Depends(get_db),
 ) -> list[MemoryResponse]:
-    """Search content, category, or source locally; no external service is used."""
-    terms = q.strip().split()
-    if not terms:
-        raise HTTPException(status_code=422, detail="Search query cannot be blank.")
-    if len(terms) > 10:
-        raise HTTPException(status_code=422, detail="Search accepts at most 10 keywords.")
-
-    memories = _database_operation(db, lambda session: search_memory_rows(session, q, limit))
+    """Search locally using a private request body; no external service is used."""
+    memories = _database_operation(
+        db,
+        lambda session: search_memory_rows(session, request.q, request.limit),
+    )
     return [MemoryResponse.model_validate(memory) for memory in memories]
 
 

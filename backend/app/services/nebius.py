@@ -56,18 +56,36 @@ def _ensure_provider_configured(settings: Settings) -> None:
 
 async def generate_reply(messages: Sequence[ChatMessage], settings: Settings) -> str:
     """Return a provider response; never synthesize a local fallback reply."""
-    _ensure_provider_configured(settings)
-
     request_messages = [
         {"role": message.role, "content": message.content}
         for message in messages
     ]
+    return await _generate_text(request_messages, settings)
+
+
+async def generate_planner_completion(
+    system_prompt: str,
+    user_prompt: str,
+    settings: Settings,
+) -> str:
+    """Ask the configured Nebius model for text; planning is validated separately."""
+    return await _generate_text(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        settings,
+    )
+
+
+async def _generate_text(messages: list[dict[str, str]], settings: Settings) -> str:
+    _ensure_provider_configured(settings)
 
     try:
         async with create_provider_client(settings) as client:
             completion = await client.chat.completions.create(
                 model=settings.nebius_model_id,
-                messages=request_messages,
+                messages=messages,
             )
     except APITimeoutError:
         raise ChatProviderError(504, "The Nebius request timed out. Please try again.") from None
@@ -85,11 +103,17 @@ async def generate_reply(messages: Sequence[ChatMessage], settings: Settings) ->
     except APIError:
         raise ChatProviderError(502, "The Nebius chat request failed.") from None
 
+    return _extract_reply(completion)
+
+
+def _extract_reply(completion: object) -> str:
+    """Accept only the text shape expected from a chat-completions response."""
     choices = getattr(completion, "choices", None)
-    if not choices:
+    if not isinstance(choices, (list, tuple)) or not choices:
         raise ChatProviderError(502, "Nebius returned no chat response.")
 
-    content = getattr(getattr(choices[0], "message", None), "content", None)
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", None)
     if not isinstance(content, str) or not content.strip():
         raise ChatProviderError(502, "Nebius returned no text response.")
 

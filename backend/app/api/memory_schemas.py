@@ -58,6 +58,29 @@ class MemoryUpdate(MemoryFields):
     """Fields accepted when replacing a memory."""
 
 
+class MemorySearchRequest(BaseModel):
+    """Private keyword search parameters sent in a request body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    q: str = Field(min_length=1, max_length=100)
+    limit: int = Field(default=50, ge=1, le=200)
+
+    @field_validator("q", mode="before")
+    @classmethod
+    def trim_query(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("q")
+    @classmethod
+    def validate_query_terms(cls, value: str) -> str:
+        if not value:
+            raise ValueError("Search query cannot be blank.")
+        if len(value.split()) > 10:
+            raise ValueError("Search accepts at most 10 keywords.")
+        return value
+
+
 class MemoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { apiFetch as fetch } from "./api";
 
 type MemoryItem = {
   id: number;
@@ -56,12 +57,14 @@ export function MemoryView({ apiBaseUrl }: MemoryViewProps) {
     const requestId = ++latestRequest.current;
     setLoading(true);
     setError(null);
-    const endpoint = query.trim()
-      ? `${apiBaseUrl}/api/memories/search?q=${encodeURIComponent(query.trim())}`
-      : `${apiBaseUrl}/api/memories`;
-
     try {
-      const response = await fetch(endpoint);
+      const response = query.trim()
+        ? await fetch(`${apiBaseUrl}/api/memories/search`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ q: query.trim() }),
+          })
+        : await fetch(`${apiBaseUrl}/api/memories`);
       if (!response.ok) throw new Error(await responseError(response));
       const payload = (await response.json()) as MemoryItem[];
       if (requestId === latestRequest.current) setMemories(payload);

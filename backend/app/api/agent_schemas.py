@@ -43,6 +43,28 @@ class AgentTaskCreate(BaseModel):
         return self
 
 
+class AgentTaskPlanRequest(BaseModel):
+    """Request a bounded plan from the configured Nebius model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_input: str = Field(min_length=1, max_length=4_000)
+
+    @field_validator("task_input", mode="before")
+    @classmethod
+    def trim_task_input(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("task_input")
+    @classmethod
+    def reject_secret_like_task_input(cls, value: str) -> str:
+        if not value:
+            raise ValueError("Task input cannot be blank.")
+        if contains_credential(value):
+            raise ValueError("Credential-like task input cannot be stored.")
+        return value
+
+
 class AgentTaskApproval(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -55,6 +77,29 @@ class AgentTaskRerun(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     confirm_write: bool = False
+
+
+class AgentTaskSearchRequest(BaseModel):
+    """History filters sent in a request body to keep private search text out of URLs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    q: str | None = Field(default=None, min_length=1, max_length=120)
+    status: TaskStatus | None = None
+    limit: int = Field(default=50, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+    @field_validator("q", mode="before")
+    @classmethod
+    def trim_query(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("q")
+    @classmethod
+    def reject_blank_query(cls, value: str | None) -> str | None:
+        if value is not None and not value:
+            raise ValueError("Search query cannot be blank.")
+        return value
 
 
 class AgentTaskResponse(BaseModel):

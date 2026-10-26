@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from dataclasses import replace
+import json
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,13 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base, get_db
+from app.core.config import Settings, get_settings
+from app.core.security import require_authenticated
 from app.main import app
-from app.models import AgentTask, AgentTraceEvent
+from app.models import AgentTask, AgentTraceEvent, Memory
+from app.services import agent_runtime
 from app.services.agent_runtime import AgentRuntimeError, decide_task_approval
+from app.services.nebius import ChatProviderError
 from app.services.tool_registry import TOOL_REGISTRY
 
 
@@ -33,12 +38,29 @@ def agent_client(tmp_path: Path) -> Iterator[tuple[TestClient, sessionmaker[Sess
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[require_authenticated] = lambda: None
     try:
         with TestClient(app) as client:
             yield client, TestSession, database_url
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(require_authenticated, None)
         test_engine.dispose()
+
+
+@pytest.fixture
+def model_planner_client(agent_client):
+    client, sessions, database_url = agent_client
+    settings = Settings(
+        _env_file=None,
+        nebius_api_key=None,
+        nebius_model_id="mock-only-model-id",
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        yield client, sessions, database_url
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
 
 
 def test_task_lifecycle_records_real_tool_trace_and_persists_after_reopen(agent_client) -> None:
@@ -125,13 +147,15 @@ def test_task_history_search_and_status_filters_match_persisted_tasks(agent_clie
         },
     ).json()
 
-    by_text = client.get("/api/agent/tasks?q=coastal")
+    by_text = client.post("/api/agent/tasks/search", json={"q": "coastal"})
     by_status = client.get("/api/agent/tasks?status=awaiting_approval")
 
     assert by_text.status_code == 200
     assert {task["id"] for task in by_text.json()} == {match["id"], waiting["id"]}
     assert [task["id"] for task in by_status.json()] == [waiting["id"]]
-    assert client.get("/api/agent/tasks?q=not-found").json() == []
+    assert client.post("/api/agent/tasks/search", json={"q": "not-found"}).json() == []
+    assert client.post("/api/agent/tasks/search", json={"q": "   "}).status_code == 422
+    assert client.get("/api/agent/tasks?q=private search").status_code == 422
     assert client.get("/api/agent/tasks?status=cancelled").status_code == 422
 
 
@@ -576,3 +600,257 @@ def test_nonexistent_tasks_and_secret_like_task_inputs_are_handled_safely(agent_
     assert missing_trace.status_code == 404
     assert secret_input.status_code == 422
     assert "local-only-test-secret" not in secret_input.text
+
+
+def test_model_planner_validates_proposal_then_executes_registered_read_tool(
+    model_planner_client, monkeypatch
+) -> None:
+    client, _, _ = model_planner_client
+    saved = client.post(
+        "/api/memories",
+        json={"content": "I prefer quiet coastal walks.", "category": "preference", "source": "user"},
+    )
+    assert saved.status_code == 201
+
+    captured = {}
+
+    async def mocked_planner(system_prompt: str, user_prompt: str, settings: Settings) -> str:
+        captured.update(system_prompt=system_prompt, user_prompt=user_prompt)
+        return json.dumps(
+            {
+                "steps": [
+                    {
+                        "tool_name": "memory_search",
+                        "tool_input": {"query": "coastal walks", "limit": 5},
+                        "description": "Search the saved local preference",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(agent_runtime, "generate_planner_completion", mocked_planner)
+    response = client.post(
+        "/api/agent/tasks/plan",
+        json={"task_input": "Find my preference about walks."},
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["status"] == "completed"
+    assert task["plan_steps"][0]["tool_name"] == "memory_search"
+    assert task["plan_steps"][0]["permission_level"] == "read"
+    assert task["plan_steps"][0]["requires_approval"] is False
+    assert captured["user_prompt"] == "Find my preference about walks."
+    assert "No memories are provided" in captured["system_prompt"]
+
+    trace = client.get(f"/api/agent/tasks/{task['id']}/trace").json()
+    events = trace["events"]
+    planner_event = next(event for event in events if event["event_type"] == "planner_started")
+    validation_event = next(event for event in events if event["event_type"] == "plan_validation")
+    plan_event = next(event for event in events if event["event_type"] == "plan_created")
+    tool_event = next(event for event in events if event["event_type"] == "tool_completed")
+    assert planner_event["result_data"] == {
+        "planner": "nebius_token_factory",
+        "model_id": "mock-only-model-id",
+    }
+    assert validation_event["result_data"] == {"valid": True, "step_count": 1}
+    assert "Nebius Token Factory proposed" in plan_event["message"]
+    assert tool_event["result_data"]["matches"][0]["id"] == saved.json()["id"]
+
+
+@pytest.mark.parametrize(
+    ("raw_response", "expected_reason"),
+    [
+        ("not json", "invalid_json"),
+        (
+            json.dumps(
+                {
+                    "steps": [
+                        {"tool_name": "shell", "tool_input": {"command": "dir"}, "description": "Run a command"}
+                    ]
+                }
+            ),
+            "unknown_tool",
+        ),
+        (
+            json.dumps(
+                {"steps": [{"tool_name": "memory_search", "tool_input": {"extra": "ignored?"}, "description": "Search"}]}
+            ),
+            "invalid_tool_input",
+        ),
+        (
+            json.dumps(
+                {
+                    "steps": [
+                        {
+                            "tool_name": "save_memory",
+                            "tool_input": {
+                                "content": "A note",
+                                "category": "general",
+                                "source": "user",
+                            },
+                            "description": "Save a note",
+                            "requires_approval": False,
+                        }
+                    ]
+                }
+            ),
+            "invalid_plan_schema",
+        ),
+        (
+            json.dumps(
+                {
+                    "steps": [
+                        {"tool_name": "current_datetime", "tool_input": {}, "description": f"Step {index}"}
+                        for index in range(6)
+                    ]
+                }
+            ),
+            "too_many_steps",
+        ),
+    ],
+)
+def test_invalid_model_plans_fail_without_executing_tools(
+    model_planner_client, monkeypatch, raw_response: str, expected_reason: str
+) -> None:
+    client, _, _ = model_planner_client
+
+    async def mocked_planner(system_prompt: str, user_prompt: str, settings: Settings) -> str:
+        return raw_response
+
+    monkeypatch.setattr(agent_runtime, "generate_planner_completion", mocked_planner)
+    response = client.post(
+        "/api/agent/tasks/plan",
+        json={"task_input": "Please perform this task."},
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["status"] == "failed"
+    assert task["plan_steps"] == []
+    trace = client.get(f"/api/agent/tasks/{task['id']}/trace").json()
+    validation = next(
+        event for event in trace["events"] if event["event_type"] == "plan_validation"
+    )
+    assert validation["status"] == "failed"
+    assert validation["result_data"]["reason"] == expected_reason
+    assert not any(event["event_type"] == "tool_started" for event in trace["events"])
+    assert raw_response not in trace["events"][-1].get("message", "")
+
+
+def test_model_planner_provider_failure_is_persisted_without_tool_execution(
+    model_planner_client, monkeypatch
+) -> None:
+    client, _, _ = model_planner_client
+
+    async def unavailable_planner(system_prompt: str, user_prompt: str, settings: Settings) -> str:
+        raise ChatProviderError(503, "Nebius is busy. Please try again shortly.")
+
+    monkeypatch.setattr(agent_runtime, "generate_planner_completion", unavailable_planner)
+    response = client.post(
+        "/api/agent/tasks/plan",
+        json={"task_input": "Check my saved notes."},
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["status"] == "failed"
+    assert "Nebius is busy" in task["result_summary"]
+    trace = client.get(f"/api/agent/tasks/{task['id']}/trace").json()
+    failure = next(event for event in trace["events"] if event["event_type"] == "planner_failed")
+    assert failure["result_data"] == {
+        "valid": False,
+        "reason": "provider_error",
+        "provider_status": 503,
+    }
+    assert not any(event["event_type"] == "tool_started" for event in trace["events"])
+
+
+def test_model_planner_missing_configuration_fails_closed_without_network_call(agent_client) -> None:
+    client, _, _ = agent_client
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        nebius_api_key=None,
+        nebius_model_id=None,
+    )
+    try:
+        response = client.post(
+            "/api/agent/tasks/plan",
+            json={"task_input": "Read the current time."},
+        )
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["status"] == "failed"
+    assert "not configured" in task["result_summary"]
+    trace = client.get(f"/api/agent/tasks/{task['id']}/trace").json()
+    assert any(event["event_type"] == "planner_failed" for event in trace["events"])
+    assert not any(event["event_type"] == "tool_started" for event in trace["events"])
+
+
+def test_model_proposed_write_waits_for_user_approval_and_rerun_confirmation(
+    model_planner_client, monkeypatch
+) -> None:
+    client, sessions, _ = model_planner_client
+    calls = 0
+
+    async def mocked_planner(system_prompt: str, user_prompt: str, settings: Settings) -> str:
+        nonlocal calls
+        calls += 1
+        return json.dumps(
+            {
+                "steps": [
+                    {
+                        "tool_name": "save_memory",
+                        "tool_input": {
+                            "content": "I prefer quiet coastal walks.",
+                            "category": "preference",
+                            "source": "agent-approved",
+                        },
+                        "description": "Save the stated preference",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(agent_runtime, "generate_planner_completion", mocked_planner)
+    response = client.post(
+        "/api/agent/tasks/plan",
+        json={"task_input": "Remember that I prefer quiet coastal walks."},
+    )
+    assert response.status_code == 201
+    task = response.json()
+    assert task["status"] == "awaiting_approval"
+    assert task["plan_steps"][0]["permission_level"] == "write"
+    assert task["plan_steps"][0]["requires_approval"] is True
+    waiting_trace = client.get(f"/api/agent/tasks/{task['id']}/trace").json()
+    assert any(event["event_type"] == "approval_requested" for event in waiting_trace["events"])
+    assert not any(event["event_type"] == "tool_started" for event in waiting_trace["events"])
+    with sessions() as session:
+        assert session.query(Memory).count() == 0
+
+    completed = client.post(
+        f"/api/agent/tasks/{task['id']}/approval",
+        json={"approved": True},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completed"
+
+    unconfirmed_rerun = client.post(f"/api/agent/tasks/{task['id']}/rerun", json={})
+    assert unconfirmed_rerun.status_code == 409
+    assert calls == 1
+    confirmed_rerun = client.post(
+        f"/api/agent/tasks/{task['id']}/rerun",
+        json={"confirm_write": True},
+    )
+    assert confirmed_rerun.status_code == 201
+    rerun_task = confirmed_rerun.json()
+    assert rerun_task["status"] == "awaiting_approval"
+    rerun_trace = client.get(f"/api/agent/tasks/{rerun_task['id']}/trace").json()
+    created_event = next(event for event in rerun_trace["events"] if event["event_type"] == "task_created")
+    assert created_event["result_data"] == {"rerun_of_task_id": task["id"]}
+    assert not any(event["event_type"] == "tool_started" for event in rerun_trace["events"])
+    with sessions() as session:
+        assert session.query(Memory).count() == 1

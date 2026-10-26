@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
+import { apiFetch as fetch, setCsrfToken } from "./api";
 import { AgentView, SkillsView } from "./AgentViews";
 import { HistoryView } from "./HistoryView";
 import { HomeView } from "./HomeView";
@@ -82,7 +83,8 @@ function NavigationIcon({ page }: { page: PageId }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d={paths[page]} stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
 
-function App() {
+function WorkspaceApp({ onLogout }: { onLogout: () => Promise<void> }) {
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const [status, setStatus] = useState<HealthStatus>("loading");
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -96,6 +98,15 @@ function App() {
   const [activePage, setActivePage] = useState<PageId>(() => pageFromHash());
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [historyTaskId, setHistoryTaskId] = useState<number | null>(null);
+
+  async function submitLogout() {
+    setLogoutError(null);
+    try {
+      await onLogout();
+    } catch (cause) {
+      setLogoutError(cause instanceof Error ? cause.message : "Could not end the session.");
+    }
+  }
 
   useEffect(() => {
     const syncPage = () => setActivePage(pageFromHash());
@@ -183,7 +194,7 @@ function App() {
       ? "Live reply received"
       : providerCallState === "failed"
         ? providerConfigurationMissing
-          ? "Not configured · no live call"
+          ? "Provider not configured · no live call"
           : providerSetup
             ? "Provider request failed"
             : "Chat request failed"
@@ -191,11 +202,9 @@ function App() {
           ? "Checking configuration"
           : !providerSetup
             ? "Status unavailable"
-            : !providerSetup.api_key_configured
-              ? "API access needed"
-              : !providerSetup.model_id_configured
-                ? "Model ID needed"
-                : "Configured · not verified";
+            : providerConfigurationMissing
+              ? "Provider not configured"
+              : "Configured · not verified";
 
   const providerDescription = providerCallState === "in_progress"
     ? "The backend is processing your chat request. No response is claimed until Token Factory returns one."
@@ -280,7 +289,7 @@ function App() {
   const providerPillTone = providerCallState === "succeeded"
     ? "success"
     : providerCallState === "failed"
-      ? "error"
+      ? providerConfigurationMissing ? "warning" : "error"
       : providerSetup?.status === "configured_unverified"
         ? "warning"
         : "neutral";
@@ -348,8 +357,10 @@ function App() {
               <span className="provider-status-dot" aria-hidden="true" />
               <span>{providerLabel}</span>
             </span>
+            <button className="logout-button" type="button" onClick={() => void submitLogout()}>Log out</button>
           </div>
         </header>
+        {logoutError && <p className="logout-error" role="alert">{logoutError}</p>}
 
         <div className="page-content">
           {activePage === "home" && (
@@ -377,7 +388,7 @@ function App() {
                 <div className="chat-panel-header">
                   <span className="chat-mark"><BrandMark /></span>
                   <div className="chat-panel-title"><strong>LODESTAR CHAT</strong><span>Server-routed · credentials stay on the backend</span></div>
-                  <span className={`provider-pill ${providerCallState === "succeeded" ? "success" : providerCallState === "failed" ? "error" : ""}`}><span className="status-dot" />{providerLabel}</span>
+                  <span className={`provider-pill ${providerCallState === "succeeded" ? "success" : providerCallState === "failed" ? providerConfigurationMissing ? "warning" : "error" : ""}`}><span className="status-dot" />{providerLabel}</span>
                 </div>
 
                 <div className="provider-setup-note" role="status" aria-live="polite">
@@ -433,6 +444,142 @@ function App() {
       </main>
     </div>
   );
+}
+
+type AuthState = "checking" | "setup_required" | "login_required" | "authenticated" | "unavailable";
+
+type AuthSession = {
+  configured: boolean;
+  authenticated: boolean;
+};
+
+function AuthGate() {
+  const [state, setState] = useState<AuthState>("checking");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshSession = useCallback(async () => {
+    setState("checking");
+    setError(null);
+    try {
+      const sessionResponse = await fetch(`${API_BASE_URL}/api/auth/session`);
+      if (!sessionResponse.ok) throw new Error("The authentication service could not be reached.");
+      const session = (await sessionResponse.json()) as AuthSession;
+      if (!session.configured) {
+        setCsrfToken(null);
+        setState("setup_required");
+        return;
+      }
+      const csrfResponse = await fetch(`${API_BASE_URL}/api/auth/csrf`);
+      if (!csrfResponse.ok) throw new Error("The session protection token could not be prepared.");
+      const csrfPayload = (await csrfResponse.json()) as { csrf_token: string };
+      setCsrfToken(csrfPayload.csrf_token);
+      setState(session.authenticated ? "authenticated" : "login_required");
+    } catch (cause) {
+      setCsrfToken(null);
+      setState("unavailable");
+      setError(cause instanceof Error ? cause.message : "Could not connect to the authentication service.");
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSession();
+    const handleUnauthorized = () => {
+      setPassword("");
+      void refreshSession().then(() => setError("Your session ended. Sign in again to continue."));
+    };
+    window.addEventListener("lodestar:unauthorized", handleUnauthorized);
+    return () => window.removeEventListener("lodestar:unauthorized", handleUnauthorized);
+  }, [refreshSession]);
+
+  async function submitLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!password || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(typeof payload?.detail === "string" ? payload.detail : `Sign-in failed (${response.status}).`);
+      }
+      setCsrfToken(payload.csrf_token);
+      setPassword("");
+      setState("authenticated");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Sign-in failed. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logout(): Promise<void> {
+    setBusy(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/auth/logout`, { method: "POST" });
+      if (!response.ok) throw new Error("Could not end the session. Please retry while connected to the API.");
+      setPassword("");
+      await refreshSession();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (state === "authenticated") return <WorkspaceApp onLogout={logout} />;
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-card" aria-labelledby="auth-title">
+        <a className="auth-brand" href="#home" aria-label="Lodestar">
+          <span className="auth-brand-mark" aria-hidden="true">✧</span>
+          <span>lodestar</span>
+        </a>
+        <p className="eyebrow"><span className="eyebrow-line" /> PERSONAL AI WORKSPACE</p>
+        {state === "checking" ? (
+          <div className="auth-state" role="status"><span className="auth-spinner" />Checking your session…</div>
+        ) : state === "setup_required" ? (
+          <>
+            <h1 id="auth-title">Set up private access.</h1>
+            <p className="auth-copy">Lodestar is locked until a demo password and session signing secret are configured on the backend.</p>
+            <div className="auth-guidance" role="note">
+              <strong>Configure the backend locally</strong>
+              <span>Copy the values from <code>.env.example</code> into your ignored root <code>.env</code>, replace both authentication placeholders with private values, then restart the backend.</span>
+              <span>Use a unique password of at least 12 characters and a random session secret of at least 32 characters. Never put either value in the frontend or commit them.</span>
+            </div>
+          </>
+        ) : state === "unavailable" ? (
+          <>
+            <h1 id="auth-title">The workspace is unavailable.</h1>
+            <p className="auth-copy">Lodestar could not verify the backend session, so private workspace data remains closed.</p>
+            {error && <p className="auth-error" role="alert">{error}</p>}
+            <button className="button-primary auth-submit" type="button" onClick={() => void refreshSession()}>Try again</button>
+          </>
+        ) : (
+          <>
+            <h1 id="auth-title">Welcome back.</h1>
+            <p className="auth-copy">Sign in to open your private Lodestar workspace.</p>
+            <form className="auth-form" onSubmit={submitLogin}>
+              <label htmlFor="auth-password">Demo password</label>
+              <input id="auth-password" type="password" autoComplete="current-password" minLength={12} maxLength={256} value={password} onChange={(event) => setPassword(event.target.value)} required disabled={busy} />
+              {error && <p className="auth-error" role="alert">{error}</p>}
+              <button className="button-primary auth-submit" type="submit" disabled={busy || password.length < 12}>{busy ? "Signing in…" : "Sign in"}</button>
+            </form>
+            <p className="auth-footnote">One private demo account · Your password stays on the backend.</p>
+          </>
+        )}
+        <footer className="auth-footer"><span>Local-first</span><span>·</span><span>Memory is user-controlled</span></footer>
+      </section>
+    </main>
+  );
+}
+
+function App() {
+  return <AuthGate />;
 }
 
 export default App;

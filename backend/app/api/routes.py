@@ -9,12 +9,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.schemas import ChatRequest, ChatResponse
 from app.core.config import Settings, get_settings
+from app.core.security import require_authenticated
 from app.database import engine
 from app.services.nebius import ChatProviderError, generate_reply
 
 
 router = APIRouter()
-api_router = APIRouter(prefix="/api")
+api_router = APIRouter(prefix="/api", dependencies=[Depends(require_authenticated)])
 
 
 class HealthResponse(BaseModel):

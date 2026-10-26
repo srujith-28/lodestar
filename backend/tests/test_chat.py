@@ -1,14 +1,22 @@
 """Chat endpoint tests with a mocked SDK client; these do not call Nebius."""
 
+import asyncio
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from openai import APITimeoutError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    RateLimitError,
+)
 from pydantic import SecretStr
 
 from app.core.config import DEFAULT_NEBIUS_BASE_URL, Settings, get_settings
+from app.core.security import require_authenticated
 from app.main import app
 from app.services import nebius
 
@@ -42,12 +50,13 @@ class FakeAsyncOpenAIClient:
         return self.result
 
 
-def configured_test_settings() -> Settings:
+def configured_test_settings(*, timeout_seconds: float = 30.0) -> Settings:
     return Settings(
         _env_file=None,
         nebius_api_key=SecretStr(MOCK_API_KEY),
         nebius_base_url="https://mock.invalid/v1/",
         nebius_model_id=MOCK_MODEL_ID,
+        nebius_timeout_seconds=timeout_seconds,
     )
 
 
@@ -56,7 +65,23 @@ def test_default_token_factory_endpoint_matches_nebius_openai_example(monkeypatc
     settings = Settings(_env_file=None)
 
     assert settings.nebius_base_url == DEFAULT_NEBIUS_BASE_URL
-    assert settings.nebius_base_url == "https://api.tokenfactory.nebius.com/"
+    assert settings.nebius_base_url == "https://api.tokenfactory.nebius.com/v1/"
+
+
+def test_nebius_settings_use_documented_environment_variable_names(monkeypatch) -> None:
+    monkeypatch.delenv("LODESTAR_AUTH_PASSWORD", raising=False)
+    monkeypatch.delenv("LODESTAR_SESSION_SECRET", raising=False)
+    monkeypatch.setenv("NEBIUS_API_KEY", MOCK_API_KEY)
+    monkeypatch.setenv("NEBIUS_BASE_URL", "https://mock.invalid/v1/")
+    monkeypatch.setenv("NEBIUS_MODEL_ID", MOCK_MODEL_ID)
+    monkeypatch.setenv("NEBIUS_TIMEOUT_SECONDS", "17.5")
+
+    settings = Settings(_env_file=None, app_env="development")
+
+    assert settings.nebius_api_key.get_secret_value() == MOCK_API_KEY
+    assert settings.nebius_base_url == "https://mock.invalid/v1/"
+    assert settings.nebius_model_id == MOCK_MODEL_ID
+    assert settings.nebius_timeout_seconds == 17.5
 
 
 def test_cors_origins_require_explicit_http_origins() -> None:
@@ -87,6 +112,7 @@ def test_tavily_configuration_masks_the_server_side_key() -> None:
 def client_for_settings(monkeypatch):
     def make(settings: Settings) -> TestClient:
         monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+        monkeypatch.setitem(app.dependency_overrides, require_authenticated, lambda: None)
         return TestClient(app)
 
     return make
@@ -100,7 +126,7 @@ def test_provider_client_uses_server_side_configuration(monkeypatch) -> None:
         return object()
 
     monkeypatch.setattr(nebius, "AsyncOpenAI", fake_async_openai)
-    settings = configured_test_settings()
+    settings = configured_test_settings(timeout_seconds=17.5)
 
     client = nebius.create_provider_client(settings)
 
@@ -108,7 +134,7 @@ def test_provider_client_uses_server_side_configuration(monkeypatch) -> None:
     assert captured == {
         "api_key": MOCK_API_KEY,
         "base_url": "https://mock.invalid/v1/",
-        "timeout": 30.0,
+        "timeout": 17.5,
         "max_retries": 0,
     }
 
@@ -138,6 +164,33 @@ def test_chat_returns_mocked_provider_completion_without_live_inference(
     assert fake.closed
 
 
+def test_model_planner_uses_the_same_configured_nebius_sdk_and_system_message(monkeypatch) -> None:
+    fake = FakeAsyncOpenAIClient(
+        result=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"steps":[]}'))]
+        )
+    )
+    monkeypatch.setattr(nebius, "create_provider_client", lambda _: fake)
+
+    result = asyncio.run(
+        nebius.generate_planner_completion(
+            "Trusted planner system rules.",
+            "Untrusted user task.",
+            configured_test_settings(),
+        )
+    )
+
+    assert result == '{"steps":[]}'
+    assert fake.request_arguments == {
+        "model": MOCK_MODEL_ID,
+        "messages": [
+            {"role": "system", "content": "Trusted planner system rules."},
+            {"role": "user", "content": "Untrusted user task."},
+        ],
+    }
+    assert fake.closed
+
+
 def test_chat_timeout_returns_safe_error_without_provider_details(
     monkeypatch, client_for_settings
 ) -> None:
@@ -161,8 +214,124 @@ def test_chat_timeout_returns_safe_error_without_provider_details(
     assert fake.closed
 
 
-def test_chat_requires_key_and_model_configuration(client_for_settings) -> None:
-    settings = Settings(_env_file=None, nebius_api_key=None, nebius_model_id=None)
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_status", "expected_detail"),
+    [
+        (
+            "authentication",
+            502,
+            "Nebius rejected the server-side credentials. Check the configured Token Factory key.",
+        ),
+        ("rate_limit", 503, "Nebius is busy. Please try again shortly."),
+        ("provider_status", 502, "Nebius could not complete the chat request."),
+        ("connection", 502, "Could not reach the configured Nebius endpoint."),
+    ],
+)
+def test_chat_provider_failures_are_mapped_without_sensitive_details(
+    monkeypatch,
+    client_for_settings,
+    caplog,
+    failure_kind: str,
+    expected_status: int,
+    expected_detail: str,
+) -> None:
+    private_prompt = "private-test-prompt-not-for-logs"
+    request = httpx.Request("POST", "https://mock.invalid/v1/chat/completions")
+    upstream_body = {"error": {"message": f"api_key={MOCK_API_KEY}; prompt={private_prompt}"}}
+    response = httpx.Response(
+        status_code={"authentication": 401, "rate_limit": 429, "provider_status": 500}.get(
+            failure_kind, 0
+        ),
+        request=request,
+        json=upstream_body,
+    ) if failure_kind != "connection" else None
+
+    if failure_kind == "authentication":
+        error = AuthenticationError(
+            message=upstream_body["error"]["message"], response=response, body=upstream_body
+        )
+    elif failure_kind == "rate_limit":
+        error = RateLimitError(
+            message=upstream_body["error"]["message"], response=response, body=upstream_body
+        )
+    elif failure_kind == "provider_status":
+        error = APIStatusError(
+            message=upstream_body["error"]["message"], response=response, body=upstream_body
+        )
+    else:
+        error = APIConnectionError(
+            message=f"{MOCK_API_KEY} {private_prompt}", request=request
+        )
+
+    fake = FakeAsyncOpenAIClient(error=error)
+    monkeypatch.setattr(nebius, "create_provider_client", lambda _: fake)
+
+    with client_for_settings(configured_test_settings()) as client:
+        result = client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": private_prompt}]},
+        )
+
+    assert result.status_code == expected_status
+    assert result.json() == {"detail": expected_detail}
+    assert MOCK_API_KEY not in result.text
+    assert private_prompt not in result.text
+    assert upstream_body["error"]["message"] not in result.text
+    assert MOCK_API_KEY not in caplog.text
+    assert private_prompt not in caplog.text
+    assert fake.closed
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        None,
+        SimpleNamespace(choices=[]),
+        SimpleNamespace(choices="malformed"),
+        SimpleNamespace(choices=[SimpleNamespace(message=None)]),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None))]),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="  "))]),
+    ],
+)
+def test_chat_rejects_malformed_provider_response_without_leaking_details(
+    monkeypatch, client_for_settings, completion
+) -> None:
+    fake = FakeAsyncOpenAIClient(result=completion)
+    monkeypatch.setattr(nebius, "create_provider_client", lambda _: fake)
+
+    with client_for_settings(configured_test_settings()) as client:
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "Hello"}]},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] in {
+        "Nebius returned no chat response.",
+        "Nebius returned no text response.",
+    }
+    assert MOCK_API_KEY not in response.text
+    assert MOCK_MODEL_ID not in response.text
+    assert fake.closed
+
+
+@pytest.mark.parametrize(
+    ("include_key", "include_model"),
+    [(False, False), (False, True), (True, False)],
+)
+def test_chat_requires_key_and_model_configuration(
+    monkeypatch, client_for_settings, include_key: bool, include_model: bool
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        nebius_api_key=SecretStr(MOCK_API_KEY) if include_key else None,
+        nebius_model_id=MOCK_MODEL_ID if include_model else None,
+    )
+    monkeypatch.setattr(
+        nebius,
+        "create_provider_client",
+        lambda _: pytest.fail("Provider client must not be created for incomplete configuration."),
+    )
 
     with client_for_settings(settings) as client:
         response = client.post(

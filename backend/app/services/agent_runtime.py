@@ -1,4 +1,4 @@
-"""Deterministic, local task orchestration over the registered tool allowlist."""
+"""Task orchestration over registered local tools and validated Nebius proposals."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -6,11 +6,15 @@ from typing import Any
 from fastapi import status
 from pydantic import BaseModel
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.api.agent_schemas import AgentTaskCreate
+from app.api.agent_schemas import AgentTaskCreate, AgentTaskPlanRequest
 from app.api.memory_schemas import contains_credential
+from app.core.config import Settings
 from app.models import AgentTask, AgentTraceEvent, Skill, utc_now
+from app.services.agent_planner import PlanValidationError, planner_system_prompt, validate_model_plan
+from app.services.nebius import ChatProviderError, generate_planner_completion
 from app.services.tool_registry import (
     InvalidToolInputError,
     ToolDefinition,
@@ -181,6 +185,166 @@ def create_task(
     db.commit()
     db.refresh(task)
     return _run_steps(db, task.id, steps, start_index=0, approval_granted=False)
+
+
+async def create_model_planned_task(
+    db: Session,
+    request: AgentTaskPlanRequest,
+    settings: Settings,
+    *,
+    rerun_from_task_id: int | None = None,
+) -> AgentTask:
+    """Persist a Nebius planning attempt, validate it locally, then use the same executor."""
+    task = AgentTask(
+        skill_id=None,
+        task_input=request.task_input,
+        status="running",
+        plan_steps=[],
+    )
+    db.add(task)
+    db.flush()
+    _record_event(
+        db,
+        task,
+        event_type="task_created",
+        status_value="running",
+        result_data=(
+            {"rerun_of_task_id": rerun_from_task_id}
+            if rerun_from_task_id is not None
+            else None
+        ),
+        message=(
+            f"Created as a new model-planned run of task #{rerun_from_task_id}; "
+            "the prior execution state was not resumed."
+            if rerun_from_task_id is not None
+            else "Task accepted for Nebius model planning; no tools have executed."
+        ),
+    )
+    _record_event(
+        db,
+        task,
+        event_type="planner_started",
+        status_value="running",
+        result_data={
+            "planner": "nebius_token_factory",
+            "model_id": settings.nebius_model_id,
+        },
+        message="Nebius Token Factory was selected for planning; no tools have executed.",
+    )
+    db.commit()
+    db.refresh(task)
+
+    try:
+        response = await generate_planner_completion(
+            planner_system_prompt(),
+            request.task_input,
+            settings,
+        )
+        proposed_steps = validate_model_plan(response)
+        steps = [
+            _prepare_step(step.tool_name, step.tool_input, step.description)
+            for step in proposed_steps
+        ]
+    except ChatProviderError as exc:
+        return _fail_planning(
+            db,
+            task.id,
+            reason="provider_error",
+            public_message=exc.public_message,
+            provider_status=exc.status_code,
+        )
+    except PlanValidationError as exc:
+        return _fail_planning(
+            db,
+            task.id,
+            reason=exc.reason,
+            public_message=exc.public_message,
+        )
+    except AgentRuntimeError:
+        return _fail_planning(
+            db,
+            task.id,
+            reason="registry_validation",
+            public_message="The proposed plan no longer matches the local tool registry. No tools were executed.",
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        raise
+    except Exception:
+        return _fail_planning(
+            db,
+            task.id,
+            reason="provider_error",
+            public_message="Nebius planning failed unexpectedly. No tools were executed.",
+        )
+
+    task = db.get(AgentTask, task.id)
+    if task is None:
+        raise AgentRuntimeError(status.HTTP_404_NOT_FOUND, "Task not found.")
+    plan = [_step_plan(index, step) for index, step in enumerate(steps)]
+    task.plan_steps = plan
+    task.updated_at = utc_now()
+    _record_event(
+        db,
+        task,
+        event_type="plan_validation",
+        status_value="succeeded",
+        result_data={"valid": True, "step_count": len(plan)},
+        message="Every proposed tool and argument passed local schema validation.",
+    )
+    _record_event(
+        db,
+        task,
+        event_type="plan_created",
+        status_value="running",
+        result_data=plan,
+        message=(
+            "Nebius Token Factory proposed this plan; the local registry validated it. "
+            "No tools executed during planning."
+        ),
+    )
+    db.commit()
+    db.refresh(task)
+    return _run_steps(db, task.id, steps, start_index=0, approval_granted=False)
+
+
+def _fail_planning(
+    db: Session,
+    task_id: int,
+    *,
+    reason: str,
+    public_message: str,
+    provider_status: int | None = None,
+) -> AgentTask:
+    task = db.get(AgentTask, task_id)
+    if task is None:
+        raise AgentRuntimeError(status.HTTP_404_NOT_FOUND, "Task not found.")
+    task.status = "failed"
+    task.result_summary = public_message
+    task.updated_at = utc_now()
+    provider_failure = reason == "provider_error"
+    _record_event(
+        db,
+        task,
+        event_type="planner_failed" if provider_failure else "plan_validation",
+        status_value="failed",
+        result_data={
+            "valid": False,
+            "reason": reason,
+            **({"provider_status": provider_status} if provider_status is not None else {}),
+        },
+        message=public_message,
+    )
+    _record_event(
+        db,
+        task,
+        event_type="task_failed",
+        status_value="failed",
+        message="Task stopped before tool execution because planning did not complete safely.",
+    )
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 def _run_steps(

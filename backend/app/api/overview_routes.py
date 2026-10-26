@@ -10,10 +10,15 @@ from sqlalchemy.orm import Session
 
 from app.api.agent_schemas import AgentTaskResponse
 from app.database import get_db
+from app.core.security import require_authenticated
 from app.models import AgentTask, AgentTraceEvent, Memory
 
 
-router = APIRouter(prefix="/api", tags=["overview"])
+router = APIRouter(
+    prefix="/api",
+    tags=["overview"],
+    dependencies=[Depends(require_authenticated)],
+)
 
 
 class RecentActivityResponse(BaseModel):

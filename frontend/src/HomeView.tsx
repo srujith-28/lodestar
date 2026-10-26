@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { apiFetch as fetch } from "./api";
 
 type AgentTask = {
   id: number;
@@ -99,17 +100,33 @@ export function HomeView({
     ? "A real chat reply arrived during this session. Model eligibility still needs confirmation."
     : providerCallState === "failed"
       ? providerSetup && (!providerSetup.api_key_configured || !providerSetup.model_id_configured)
-        ? "The request was rejected because provider configuration is incomplete; no live model call was made."
+        ? "Provider not configured. The request was rejected before a live model call."
         : providerSetup
           ? "The configured provider request failed. No successful inference is recorded."
           : "The chat request failed, but provider status could not be confirmed."
       : providerCallState === "in_progress"
         ? "Waiting for the configured provider to return a reply."
-        : !providerSetup?.api_key_configured
-          ? "No live inference has been verified. Add server-side access when available."
-          : !providerSetup.model_id_configured
-            ? "Choose a verified model ID before making a live request."
-            : "Configuration is present, but no live check runs until you send a chat message.";
+        : !providerSetup
+          ? "Provider status is unavailable; no live inference has been verified."
+          : !providerSetup.api_key_configured
+            ? "Provider not configured. Set NEBIUS_API_KEY in the server environment after access is granted; no live inference has been verified."
+            : !providerSetup.model_id_configured
+              ? "Provider not configured. Set a verified NEBIUS_MODEL_ID on the server before making a live request."
+              : "Configuration is present, but no live check runs until you send a chat message.";
+  const providerConfigurationMissing = Boolean(
+    providerSetup && (!providerSetup.api_key_configured || !providerSetup.model_id_configured),
+  );
+  const providerBadgeLabel = providerCallState === "succeeded"
+    ? "Live reply"
+    : providerCallState === "failed"
+      ? providerConfigurationMissing ? "Provider not configured" : "Request failed"
+      : providerStatusLoading
+        ? "Checking…"
+        : providerConfigurationMissing
+          ? "Provider not configured"
+          : providerSetup?.status === "configured_unverified"
+            ? "Unverified"
+            : providerSetup ? "Not connected" : "Status unavailable";
 
   return (
     <section className="home-view" id="home" aria-labelledby="home-title">
@@ -218,8 +235,8 @@ export function HomeView({
         <section className="surface-card provider-card" aria-labelledby="provider-title">
           <div className="surface-heading">
             <div><span className="eyebrow-label">MODEL CONNECTIVITY</span><h2 id="provider-title">Nebius Token Factory</h2></div>
-            <span className={`status-badge ${providerCallState === "succeeded" ? "completed" : providerCallState === "failed" ? "failed" : "pending"}`}>
-              {providerCallState === "succeeded" ? "Live reply" : providerCallState === "failed" ? providerSetup && (!providerSetup.api_key_configured || !providerSetup.model_id_configured) ? "No live call" : "Request failed" : providerSetup?.status === "configured_unverified" ? "Unverified" : "Not connected"}
+            <span className={`status-badge ${providerCallState === "succeeded" ? "completed" : providerCallState === "failed" && !providerConfigurationMissing ? "failed" : "pending"}`}>
+              {providerBadgeLabel}
             </span>
           </div>
           <p className="provider-note">{providerNote}</p>

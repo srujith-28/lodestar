@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base, get_db
+from app.core.security import require_authenticated
 from app.main import app
 from app.models import Memory
 
@@ -30,11 +31,13 @@ def memory_client(tmp_path: Path) -> Iterator[tuple[TestClient, sessionmaker[Ses
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[require_authenticated] = lambda: None
     try:
         with TestClient(app) as client:
             yield client, TestSession, database_url
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(require_authenticated, None)
         test_engine.dispose()
 
 
@@ -98,8 +101,8 @@ def test_keyword_search_matches_content_category_and_is_local(memory_client) -> 
     first = make_memory(client, "Keep notes about mountain hikes")
     make_memory(client, "Use a quiet workspace")
 
-    response = client.get("/api/memories/search", params={"q": "mountain hikes"})
-    category_response = client.get("/api/memories/search", params={"q": "preference"})
+    response = client.post("/api/memories/search", json={"q": "mountain hikes"})
+    category_response = client.post("/api/memories/search", json={"q": "preference"})
 
     assert response.status_code == 200
     assert [item["id"] for item in response.json()] == [first["id"]]
@@ -153,5 +156,5 @@ def test_invalid_ids_and_search_inputs_are_rejected(memory_client) -> None:
 
     assert client.get("/api/memories/0").status_code == 422
     assert client.get("/api/memories/not-an-id").status_code == 422
-    assert client.get("/api/memories/search", params={"q": "   "}).status_code == 422
-    assert client.get("/api/memories/search", params={"q": "word " * 11}).status_code == 422
+    assert client.post("/api/memories/search", json={"q": "   "}).status_code == 422
+    assert client.post("/api/memories/search", json={"q": "word " * 11}).status_code == 422

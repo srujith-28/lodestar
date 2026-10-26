@@ -32,7 +32,7 @@ class Memory(Base):
 
 
 class AgentTask(Base):
-    """A user-submitted, structured task and its deterministic plan."""
+    """A user-submitted task and its persisted local or model-proposed plan snapshot."""
 
     __tablename__ = "agent_tasks"
 

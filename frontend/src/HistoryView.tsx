@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { apiFetch as fetch } from "./api";
 
 type JsonObject = Record<string, unknown>;
 type TaskStatus = "pending" | "running" | "completed" | "failed" | "awaiting_approval";
@@ -87,12 +88,19 @@ export function HistoryView({ apiBaseUrl, initialTaskId, onNavigate }: HistoryVi
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ limit: String(PAGE_SIZE + 1), offset: "0" });
       const query = options.query ?? searchQuery;
       const status = options.status ?? statusFilter;
-      if (query.trim()) params.set("q", query.trim());
-      if (status !== "all") params.set("status", status);
-      const response = await fetch(`${apiBaseUrl}/api/agent/tasks?${params}`, { signal: options.signal });
+      const response = await fetch(`${apiBaseUrl}/api/agent/tasks/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          q: query.trim() || null,
+          status: status === "all" ? null : status,
+          limit: PAGE_SIZE + 1,
+          offset: 0,
+        }),
+        signal: options.signal,
+      });
       if (!response.ok) throw new Error(await responseError(response));
       const payload = (await response.json()) as Task[];
       const visibleTasks = payload.slice(0, PAGE_SIZE);
@@ -144,10 +152,16 @@ export function HistoryView({ apiBaseUrl, initialTaskId, onNavigate }: HistoryVi
     setLoadingMore(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ limit: String(PAGE_SIZE + 1), offset: String(tasks.length) });
-      if (searchQuery.trim()) params.set("q", searchQuery.trim());
-      if (statusFilter !== "all") params.set("status", statusFilter);
-      const response = await fetch(`${apiBaseUrl}/api/agent/tasks?${params}`);
+      const response = await fetch(`${apiBaseUrl}/api/agent/tasks/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          q: searchQuery.trim() || null,
+          status: statusFilter === "all" ? null : statusFilter,
+          limit: PAGE_SIZE + 1,
+          offset: tasks.length,
+        }),
+      });
       if (!response.ok) throw new Error(await responseError(response));
       const payload = (await response.json()) as Task[];
       setTasks((current) => [...current, ...payload.slice(0, PAGE_SIZE)]);

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { apiFetch as fetch } from "./api";
 
 type JsonObject = Record<string, unknown>;
 type SkillStatus = "draft" | "pending_approval" | "approved" | "disabled";
+type PlannerProviderStatus = "missing_configuration" | "configured_unverified" | "unavailable";
 
 type RegisteredTool = {
   name: string;
@@ -186,6 +188,7 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
   const [events, setEvents] = useState<TraceEvent[]>([]);
   const [traceLoading, setTraceLoading] = useState(false);
   const [loadingOptions, setLoadingOptions] = useState(true);
+  const [plannerProviderStatus, setPlannerProviderStatus] = useState<PlannerProviderStatus>("unavailable");
   const [submitting, setSubmitting] = useState(false);
   const [actingOnApproval, setActingOnApproval] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -202,6 +205,14 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
       if (!skillResponse.ok) throw new Error(await responseError(skillResponse));
       setTools((await toolResponse.json()) as RegisteredTool[]);
       setSkills((await skillResponse.json()) as SkillItem[]);
+      try {
+        const providerResponse = await fetch(`${apiBaseUrl}/api/provider/status`);
+        if (!providerResponse.ok) throw new Error("Provider status unavailable.");
+        const provider = (await providerResponse.json()) as { status: PlannerProviderStatus };
+        setPlannerProviderStatus(provider.status);
+      } catch {
+        setPlannerProviderStatus("unavailable");
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not load registered tools and skills.");
     } finally {
@@ -242,6 +253,7 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
     ? selectedTarget.slice("tool:".length)
     : null;
   const selectedTool = tools.find((tool) => tool.name === selectedToolName);
+  const selectedModelPlanner = selectedTarget === "planner:nebius";
 
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -251,12 +263,15 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
     setTask(null);
     setEvents([]);
     try {
-      const body = selectedSkillId
-        ? { task_input: taskInput, skill_id: selectedSkillId }
-        : { task_input: taskInput, tool_name: selectedToolName, tool_input: toolInput };
+      const body = selectedModelPlanner
+        ? { task_input: taskInput }
+        : selectedSkillId
+          ? { task_input: taskInput, skill_id: selectedSkillId }
+          : { task_input: taskInput, tool_name: selectedToolName, tool_input: toolInput };
+      const taskEndpoint = selectedModelPlanner ? "/api/agent/tasks/plan" : "/api/agent/tasks";
       let response: Response;
       try {
-        response = await fetch(`${apiBaseUrl}/api/agent/tasks`, {
+        response = await fetch(`${apiBaseUrl}${taskEndpoint}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -306,12 +321,12 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
     <section className="agent-section" id="agent" aria-labelledby="agent-title">
       <div className="agent-heading">
         <div>
-          <div className="eyebrow subtle"><span className="eyebrow-line" /> LOCAL TASK RUNNER</div>
+          <div className="eyebrow subtle"><span className="eyebrow-line" /> AGENT TASK RUNNER</div>
           <h2 id="agent-title">Give a task<br /><span>a clear next step.</span></h2>
         </div>
         <div className="agent-heading-copy">
           <p className="section-description">
-            Planning is local and deterministic. Choose a registered tool or approved skill; no LLM reasoning or external service is used here.
+            Choose a local deterministic tool or approved skill, or explicitly request a bounded proposal from the configured Nebius model. Every proposed action is checked locally before execution.
           </p>
           <a className="agent-text-button" href="#skills">Review reusable skills</a>
           <button className="agent-text-button" type="button" onClick={() => void loadOptions()} disabled={loadingOptions}>
@@ -334,10 +349,14 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
             required
             maxLength={4_000}
             rows={2}
-            placeholder="Describe what you want the local task runner to do."
+            placeholder="Describe the task for the selected planning mode."
           />
-          <p className="agent-input-hint">This description is recorded with the task. The selected registered tool below determines the action.</p>
-          <label htmlFor="agent-target">Registered tool or approved skill</label>
+          <p className="agent-input-hint">
+            {selectedModelPlanner
+              ? "This description is recorded and sent to Nebius as a planning request; saved memories are not included."
+              : "This description is recorded with the task. The selected registered tool or approved skill determines the action."}
+          </p>
+          <label htmlFor="agent-target">Planning and execution mode</label>
           <select
             id="agent-target"
             value={selectedTarget}
@@ -360,7 +379,25 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
                 <option key={skill.id} value={`skill:${skill.id}`}>{skill.name}</option>
               ))}
             </optgroup>
+            <optgroup label="Model planning">
+              <option value="planner:nebius">Plan with the configured Nebius model</option>
+            </optgroup>
           </select>
+
+          {selectedModelPlanner && (
+            <div className="agent-selected-tool">
+              <span className={`planner-status-pill ${plannerProviderStatus}`}>
+                {plannerProviderStatus === "configured_unverified"
+                  ? "Configured · unverified"
+                  : plannerProviderStatus === "missing_configuration"
+                    ? "Provider not configured"
+                    : "Provider status unavailable"}
+              </span>
+              <span>
+                The task description is sent to Nebius for a proposal; saved memories are not sent. If planning is unavailable or invalid, the task fails without running tools. Write actions still require separate approval.
+              </span>
+            </div>
+          )}
 
           {selectedTool && (
             <div className="agent-selected-tool">
@@ -382,9 +419,9 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
             <p className="agent-inline-note">This saved skill will run only because it is approved. Any write tool inside it still requires approval for this task.</p>
           )}
           <div className="agent-form-footer">
-            <span>Only the selected tools run. Memory search happens only when selected directly or in a skill.</span>
+            <span>{selectedModelPlanner ? "Only locally validated registered tools can run; no memory is added to the model request." : "Only the selected tools run. Memory search happens only when selected directly or in a skill."}</span>
             <button className="agent-primary-button" type="submit" disabled={submitting || loadingOptions || !taskInput.trim()}>
-              {submitting ? "Running…" : "Run local task"}
+              {submitting ? (selectedModelPlanner ? "Planning…" : "Running…") : selectedModelPlanner ? "Plan with Nebius" : "Run local task"}
             </button>
           </div>
         </form>
@@ -464,7 +501,15 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
                     {event.input_data && <details><summary>Actual tool input</summary><pre>{pretty(event.input_data)}</pre></details>}
                     {event.result_data !== null && event.result_data !== undefined && (
                       <details open={event.event_type === "tool_completed"}>
-                        <summary>{event.tool_name === "memory_search" ? "Actual keyword matches · local memories" : "Actual tool result"}</summary>
+                        <summary>
+                          {event.event_type === "plan_created"
+                            ? "Validated model-proposed plan"
+                            : event.tool_name === "memory_search"
+                              ? "Actual keyword matches · local memories"
+                              : event.event_type === "plan_validation"
+                                ? "Validation outcome"
+                                : "Actual tool result"}
+                        </summary>
                         <pre>{pretty(event.result_data)}</pre>
                       </details>
                     )}
@@ -475,7 +520,7 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
           </div>
         )}
       </div>
-      <p className="agent-privacy-note">Local registered tools only · Tool traces are stored in the configured database · No model call is made by this task runner</p>
+      <p className="agent-privacy-note">Execution is limited to registered local tools · Every write pauses for approval · Model planning is optional and clearly traced</p>
     </section>
   );
 }
