@@ -18,6 +18,7 @@ type ProviderStatusPayload = {
   status: "missing_configuration" | "configured_unverified";
   api_key_configured: boolean;
   model_id_configured: boolean;
+  model_id: string | null;
 };
 
 type ProviderCallState = "idle" | "in_progress" | "succeeded" | "failed";
@@ -392,7 +393,17 @@ function WorkspaceApp({ onLogout }: { onLogout: () => Promise<void> }) {
                 </div>
 
                 <div className="provider-setup-note" role="status" aria-live="polite">
-                  <div><strong>{providerSetup?.provider ?? "Nebius Token Factory"}</strong><span>{providerDescription}</span></div>
+                  <div>
+                    <strong>{providerSetup?.provider ?? "Nebius Token Factory"}</strong>
+                    <span>{providerDescription}</span>
+                    <span className="provider-model-reference">
+                      {providerSetup?.model_id
+                        ? <>Model <code>{providerSetup.model_id}</code> · configuration does not confirm live inference</>
+                        : providerSetup
+                          ? "Model ID not configured"
+                          : "Model status unavailable"}
+                    </span>
+                  </div>
                   <button className="text-button" type="button" onClick={() => void checkProviderStatus()} disabled={providerStatusLoading}>{providerStatusLoading ? "Checking…" : "Refresh status"}</button>
                 </div>
 

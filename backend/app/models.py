@@ -92,3 +92,25 @@ class Skill(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )
+
+
+class AuthSession(Base):
+    """An active signed browser session, indexed by a one-way keyed identifier."""
+
+    __tablename__ = "auth_sessions"
+
+    session_id_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at_epoch: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class AuthLoginRateLimit(Base):
+    """Persistent fixed-window login attempt bucket keyed by a keyed client hash."""
+
+    __tablename__ = "auth_login_rate_limits"
+
+    client_key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_started_at_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -7,13 +7,14 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.agent_routes import router as agent_router, skills_router
 from app.api.auth_routes import router as auth_router
 from app.api.memory_routes import router as memory_router
 from app.api.overview_routes import router as overview_router
 from app.api.routes import api_router, router
-from app.core.config import Settings, get_settings
+from app.core.config import REPOSITORY_ROOT, Settings, get_settings
 from app.database import initialize_database
 
 
@@ -50,6 +51,16 @@ def create_app(settings: Settings) -> FastAPI:
     application.include_router(overview_router)
     application.include_router(agent_router)
     application.include_router(skills_router)
+
+    # A single Render web service builds Vite once and serves the resulting SPA
+    # from FastAPI. API routes are registered first so they retain precedence.
+    frontend_dist = REPOSITORY_ROOT / "frontend" / "dist"
+    if frontend_dist.is_dir():
+        application.mount(
+            "/",
+            StaticFiles(directory=frontend_dist, html=True),
+            name="frontend",
+        )
 
     @application.middleware("http")
     async def prevent_api_caching(request, call_next):

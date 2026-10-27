@@ -33,6 +33,7 @@ type ProviderSetup = {
   status: "missing_configuration" | "configured_unverified";
   api_key_configured: boolean;
   model_id_configured: boolean;
+  model_id: string | null;
 } | null;
 type ProviderCallState = "idle" | "in_progress" | "succeeded" | "failed";
 type HomeViewProps = {
@@ -241,7 +242,13 @@ export function HomeView({
           </div>
           <p className="provider-note">{providerNote}</p>
           <div className="provider-card-footer">
-            <span>{providerSetup?.provider ?? "Provider status unavailable"} · configuration only</span>
+            <span className="provider-model-reference">
+              {providerSetup?.model_id
+                ? <>Model <code>{providerSetup.model_id}</code> · configuration only</>
+                : providerSetup
+                  ? "Model ID not configured · configuration only"
+                  : "Model status unavailable"}
+            </span>
             <button className="text-button" type="button" onClick={onRefreshProvider} disabled={providerStatusLoading}>
               {providerStatusLoading ? "Checking…" : "Refresh status"}
             </button>

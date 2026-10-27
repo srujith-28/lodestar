@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: lodestar-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_NAME
+        value: Lodestar
+      - key: CORS_ORIGINS
+        fromService:
+          type: web
+          name: lodestar-demo
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: DATABASE_URL
+        fromDatabase:
+          name: lodestar-demo-db
+          property: connectionString
+      - key: LODESTAR_AUTH_PASSWORD
+        sync: false
+      - key: LODESTAR_SESSION_SECRET
+        generateValue: true
+      - key: LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+        value: "5"
+      - key: LOGIN_RATE_LIMIT_WINDOW_SECONDS
+        value: "900"
+      # Do not configure TRUSTED_PROXY_CIDRS until the inbound proxy trust range
+      # and X-Forwarded-For sanitization behavior are verified for this service.
+
+databases:
+  - name: lodestar-demo-db
+    databaseName: lodestar
+    user: lodestar
+    plan: free

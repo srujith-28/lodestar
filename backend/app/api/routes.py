@@ -25,12 +25,13 @@ class HealthResponse(BaseModel):
 
 
 class ProviderStatusResponse(BaseModel):
-    """Expose provider configuration state without exposing credentials."""
+    """Expose the configured provider/model state without exposing credentials."""
 
     provider: Literal["Nebius Token Factory"] = "Nebius Token Factory"
     status: Literal["missing_configuration", "configured_unverified"]
     api_key_configured: bool
     model_id_configured: bool
+    model_id: str | None
 
 
 @router.get("/health", response_model=HealthResponse, tags=["health"])
@@ -85,4 +86,5 @@ def provider_status(settings: Settings = Depends(get_settings)) -> ProviderStatu
         ),
         api_key_configured=api_key_configured,
         model_id_configured=model_id_configured,
+        model_id=settings.nebius_model_id,
     )

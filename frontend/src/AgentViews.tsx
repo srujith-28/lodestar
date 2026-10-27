@@ -183,12 +183,13 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [selectedTarget, setSelectedTarget] = useState("tool:memory_search");
   const [toolInput, setToolInput] = useState<JsonObject>({ query: "", limit: 10 });
-  const [taskInput, setTaskInput] = useState("Find my saved note about a personal preference.");
+  const [taskInput, setTaskInput] = useState("");
   const [task, setTask] = useState<TaskItem | null>(null);
   const [events, setEvents] = useState<TraceEvent[]>([]);
   const [traceLoading, setTraceLoading] = useState(false);
   const [loadingOptions, setLoadingOptions] = useState(true);
   const [plannerProviderStatus, setPlannerProviderStatus] = useState<PlannerProviderStatus>("unavailable");
+  const [plannerModelId, setPlannerModelId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [actingOnApproval, setActingOnApproval] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -208,10 +209,15 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
       try {
         const providerResponse = await fetch(`${apiBaseUrl}/api/provider/status`);
         if (!providerResponse.ok) throw new Error("Provider status unavailable.");
-        const provider = (await providerResponse.json()) as { status: PlannerProviderStatus };
+        const provider = (await providerResponse.json()) as {
+          status: PlannerProviderStatus;
+          model_id: string | null;
+        };
         setPlannerProviderStatus(provider.status);
+        setPlannerModelId(provider.model_id);
       } catch {
         setPlannerProviderStatus("unavailable");
+        setPlannerModelId(null);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not load registered tools and skills.");
@@ -395,6 +401,13 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
               </span>
               <span>
                 The task description is sent to Nebius for a proposal; saved memories are not sent. If planning is unavailable or invalid, the task fails without running tools. Write actions still require separate approval.
+              </span>
+              <span className="provider-model-reference">
+                {plannerProviderStatus === "unavailable"
+                  ? "Model status unavailable"
+                  : plannerModelId
+                    ? <>Model <code>{plannerModelId}</code> · configuration does not confirm live inference</>
+                    : "Model ID not configured"}
               </span>
             </div>
           )}

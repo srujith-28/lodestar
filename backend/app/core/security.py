@@ -12,8 +12,13 @@ import time
 from typing import TypedDict
 
 from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.database import get_db
+from app.models import AuthSession
 
 
 SESSION_COOKIE = "lodestar_session"
@@ -25,6 +30,7 @@ SESSION_MAX_AGE_SECONDS = 8 * 60 * 60
 class SessionClaims(TypedDict):
     issued_at: int
     csrf_token: str
+    session_id: str
 
 
 def _secret_bytes(settings: Settings) -> bytes:
@@ -44,9 +50,19 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def issue_session(csrf_token: str, settings: Settings, *, issued_at: int | None = None) -> str:
+def issue_session(
+    csrf_token: str,
+    session_id: str,
+    settings: Settings,
+    *,
+    issued_at: int | None = None,
+) -> str:
     payload = json.dumps(
-        {"issued_at": issued_at if issued_at is not None else int(time.time()), "csrf_token": csrf_token},
+        {
+            "issued_at": issued_at if issued_at is not None else int(time.time()),
+            "csrf_token": csrf_token,
+            "session_id": session_id,
+        },
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
@@ -71,19 +87,57 @@ def read_session(token: str | None, settings: Settings, *, now: int | None = Non
             return None
         issued_at = payload.get("issued_at")
         csrf_token = payload.get("csrf_token")
+        session_id = payload.get("session_id")
         current_time = int(time.time()) if now is None else now
         if (
-            not isinstance(issued_at, int)
+            set(payload) != {"issued_at", "csrf_token", "session_id"}
+            or not isinstance(issued_at, int)
+            or isinstance(issued_at, bool)
             or issued_at > current_time + 60
-            or current_time - issued_at > SESSION_MAX_AGE_SECONDS
+            or current_time - issued_at >= SESSION_MAX_AGE_SECONDS
             or not isinstance(csrf_token, str)
             or len(csrf_token) < 32
             or len(csrf_token) > 128
+            or not isinstance(session_id, str)
+            or len(session_id) < 32
+            or len(session_id) > 128
         ):
             return None
-        return {"issued_at": issued_at, "csrf_token": csrf_token}
+        return {"issued_at": issued_at, "csrf_token": csrf_token, "session_id": session_id}
     except (ValueError, TypeError, UnicodeError, binascii.Error, json.JSONDecodeError, HTTPException):
         return None
+
+
+def keyed_identifier_hash(value: str, settings: Settings, *, purpose: str) -> str:
+    """Return a purpose-separated keyed digest for server-side auth records."""
+    return hmac.new(
+        _secret_bytes(settings),
+        f"lodestar:{purpose}:{value}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def has_active_session(
+    session_id: str,
+    db: Session,
+    settings: Settings,
+    *,
+    now: int | None = None,
+) -> bool:
+    current_time = int(time.time()) if now is None else now
+    try:
+        return db.scalar(
+            select(AuthSession.session_id_hash).where(
+                AuthSession.session_id_hash
+                == keyed_identifier_hash(session_id, settings, purpose="session"),
+                AuthSession.expires_at_epoch > current_time,
+            )
+        ) is not None
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Session storage is unavailable.",
+        ) from None
 
 
 def new_csrf_token() -> str:
@@ -99,7 +153,11 @@ def request_origin_is_allowed(request: Request, settings: Settings) -> bool:
     return origin is None or origin.rstrip("/") in settings.allowed_origins
 
 
-def require_authenticated(request: Request, settings: Settings = Depends(get_settings)) -> SessionClaims:
+def require_authenticated(
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> SessionClaims:
     """Protect private routes and reject unsafe requests without a matching CSRF token."""
     if not settings.auth_configured:
         _secret_bytes(settings)
@@ -107,7 +165,7 @@ def require_authenticated(request: Request, settings: Settings = Depends(get_set
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request origin is not allowed.")
 
     claims = read_session(request.cookies.get(SESSION_COOKIE), settings)
-    if claims is None:
+    if claims is None or not has_active_session(claims["session_id"], db, settings):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
 
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
