@@ -25,19 +25,27 @@ SESSION_COOKIE = "lodestar_session"
 CSRF_COOKIE = "lodestar_csrf"
 CSRF_HEADER = "X-CSRF-Token"
 SESSION_MAX_AGE_SECONDS = 8 * 60 * 60
+PERSONAL_WORKSPACE_ID = "personal"
+GUEST_WORKSPACE_PREFIX = "guest_"
 
 
 class SessionClaims(TypedDict):
     issued_at: int
     csrf_token: str
     session_id: str
+    workspace_id: str
+
+
+class WorkspaceContext(TypedDict):
+    id: str
+    is_guest: bool
 
 
 def _secret_bytes(settings: Settings) -> bytes:
-    if not settings.auth_configured or settings.lodestar_session_secret is None:
+    if settings.lodestar_session_secret is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Demo authentication is not configured. Set LODESTAR_AUTH_PASSWORD and LODESTAR_SESSION_SECRET.",
+            detail="Demo session signing is not configured on the backend.",
         )
     return settings.lodestar_session_secret.get_secret_value().encode("utf-8")
 
@@ -55,6 +63,7 @@ def issue_session(
     session_id: str,
     settings: Settings,
     *,
+    workspace_id: str = PERSONAL_WORKSPACE_ID,
     issued_at: int | None = None,
 ) -> str:
     payload = json.dumps(
@@ -62,6 +71,7 @@ def issue_session(
             "issued_at": issued_at if issued_at is not None else int(time.time()),
             "csrf_token": csrf_token,
             "session_id": session_id,
+            "workspace_id": workspace_id,
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -88,9 +98,10 @@ def read_session(token: str | None, settings: Settings, *, now: int | None = Non
         issued_at = payload.get("issued_at")
         csrf_token = payload.get("csrf_token")
         session_id = payload.get("session_id")
+        workspace_id = payload.get("workspace_id")
         current_time = int(time.time()) if now is None else now
         if (
-            set(payload) != {"issued_at", "csrf_token", "session_id"}
+            set(payload) != {"issued_at", "csrf_token", "session_id", "workspace_id"}
             or not isinstance(issued_at, int)
             or isinstance(issued_at, bool)
             or issued_at > current_time + 60
@@ -101,9 +112,16 @@ def read_session(token: str | None, settings: Settings, *, now: int | None = Non
             or not isinstance(session_id, str)
             or len(session_id) < 32
             or len(session_id) > 128
+            or not isinstance(workspace_id, str)
+            or not 1 <= len(workspace_id) <= 80
         ):
             return None
-        return {"issued_at": issued_at, "csrf_token": csrf_token, "session_id": session_id}
+        return {
+            "issued_at": issued_at,
+            "csrf_token": csrf_token,
+            "session_id": session_id,
+            "workspace_id": workspace_id,
+        }
     except (ValueError, TypeError, UnicodeError, binascii.Error, json.JSONDecodeError, HTTPException):
         return None
 
@@ -122,17 +140,19 @@ def has_active_session(
     db: Session,
     settings: Settings,
     *,
+    workspace_id: str | None = None,
     now: int | None = None,
 ) -> bool:
     current_time = int(time.time()) if now is None else now
     try:
-        return db.scalar(
-            select(AuthSession.session_id_hash).where(
+        statement = select(AuthSession.session_id_hash).where(
                 AuthSession.session_id_hash
                 == keyed_identifier_hash(session_id, settings, purpose="session"),
                 AuthSession.expires_at_epoch > current_time,
             )
-        ) is not None
+        if workspace_id is not None:
+            statement = statement.where(AuthSession.workspace_id == workspace_id)
+        return db.scalar(statement) is not None
     except SQLAlchemyError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -165,7 +185,12 @@ def require_authenticated(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request origin is not allowed.")
 
     claims = read_session(request.cookies.get(SESSION_COOKIE), settings)
-    if claims is None or not has_active_session(claims["session_id"], db, settings):
+    if claims is None or not has_active_session(
+        claims["session_id"],
+        db,
+        settings,
+        workspace_id=claims["workspace_id"],
+    ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
 
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
@@ -178,3 +203,36 @@ def require_authenticated(
         ):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF validation failed.")
     return claims
+
+
+def require_workspace_access(
+    claims: SessionClaims = Depends(require_authenticated),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> WorkspaceContext:
+    """Apply guest API request caps and return the server-verified data scope."""
+    # Existing endpoint unit tests override authentication with None to exercise
+    # handler logic. Production authentication always returns signed claims.
+    if claims is None:
+        return {"id": PERSONAL_WORKSPACE_ID, "is_guest": False}
+
+    workspace_id = claims["workspace_id"]
+    is_guest = workspace_id.startswith(GUEST_WORKSPACE_PREFIX)
+    if is_guest:
+        from app.services.demo_usage import GuestLimitExceeded, reserve_guest_request
+
+        try:
+            reserve_guest_request(db, workspace_id, settings)
+        except GuestLimitExceeded as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Guest demo request limit reached. Please wait before trying again.",
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from None
+        except SQLAlchemyError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Guest demo limits are unavailable.",
+            ) from None
+    return {"id": workspace_id, "is_guest": is_guest}

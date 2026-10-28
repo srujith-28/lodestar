@@ -85,6 +85,7 @@ class MemoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    is_sample: bool = False
     content: str
     category: str
     source: str

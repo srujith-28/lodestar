@@ -22,8 +22,16 @@ def test_render_blueprint_defines_one_web_service_and_persistent_database() -> N
     assert database_url["fromDatabase"]["property"] == "connectionString"
     assert env_vars["LOGIN_RATE_LIMIT_MAX_ATTEMPTS"]["value"] == "5"
     assert env_vars["LOGIN_RATE_LIMIT_WINDOW_SECONDS"]["value"] == "900"
+    assert env_vars["GUEST_DEMO_ENABLED"]["value"] == "true"
+    assert env_vars["GUEST_DATA_RETENTION_DAYS"]["value"] == "7"
+    assert env_vars["GUEST_PROVIDER_CALLS_GLOBAL_PER_DAY"]["value"] == "40"
     # No Render proxy CIDRs are configured until the deployment trust boundary
     # and forwarding-header sanitization behavior have been verified.
     assert "TRUSTED_PROXY_CIDRS" not in env_vars
     assert len(databases) == 1
     assert databases[0]["plan"] == "free"
+
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    # Keep the raw socket peer visible to app-level trusted-proxy validation;
+    # Uvicorn must not rewrite request.client from untrusted forwarding headers.
+    assert "--no-proxy-headers" in dockerfile

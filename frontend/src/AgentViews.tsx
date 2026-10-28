@@ -31,6 +31,7 @@ type SkillItem = {
 
 type TaskItem = {
   id: number;
+  is_sample: boolean;
   skill_id: number | null;
   task_input: string;
   status: "pending" | "running" | "completed" | "failed" | "awaiting_approval";
@@ -447,6 +448,7 @@ export function AgentView({ apiBaseUrl }: AgentViewsProps) {
             <div className="agent-run-header">
               <div>
                 <span className="card-kicker">TASK #{task.id}</span>
+                {task.is_sample && <span className="sample-data-badge">Sample data</span>}
                 <h3>{task.task_input}</h3>
               </div>
               <span className={`agent-status ${task.status}`}>{task.status.replaceAll("_", " ")}</span>

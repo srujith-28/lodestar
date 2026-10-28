@@ -3,7 +3,7 @@
 let csrfToken: string | null = null;
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-const AUTH_PATHS = ["/api/auth/session", "/api/auth/csrf", "/api/auth/login"];
+const AUTH_PATHS = ["/api/auth/session", "/api/auth/csrf", "/api/auth/login", "/api/auth/demo"];
 
 export function setCsrfToken(token: string | null) {
   csrfToken = token;

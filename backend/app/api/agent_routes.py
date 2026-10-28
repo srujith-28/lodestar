@@ -24,7 +24,7 @@ from app.api.agent_schemas import (
 )
 from app.core.config import Settings, get_settings
 from app.database import get_db
-from app.core.security import require_authenticated
+from app.core.security import WorkspaceContext, require_workspace_access
 from app.models import AgentTask, Skill, utc_now
 from app.services.agent_runtime import (
     AgentRuntimeError,
@@ -44,12 +44,12 @@ from app.services.tool_registry import (
 router = APIRouter(
     prefix="/api/agent",
     tags=["agent"],
-    dependencies=[Depends(require_authenticated)],
+    dependencies=[Depends(require_workspace_access)],
 )
 skills_router = APIRouter(
     prefix="/api/agent/skills",
     tags=["skills"],
-    dependencies=[Depends(require_authenticated)],
+    dependencies=[Depends(require_workspace_access)],
 )
 Result = TypeVar("Result")
 
@@ -79,8 +79,33 @@ def _runtime_operation(operation: Callable[[], Result], db: Session | None = Non
         ) from None
 
 
-def _skill_or_404(db: Session, skill_id: int) -> Skill:
-    skill = db.get(Skill, skill_id)
+def _reserve_guest_provider_quota(
+    db: Session, workspace: WorkspaceContext, settings: Settings
+) -> None:
+    if not workspace["is_guest"] or not settings.nebius_api_key or not settings.nebius_model_id:
+        return
+    from app.services.demo_usage import GuestLimitExceeded, reserve_guest_provider_call
+
+    try:
+        reserve_guest_provider_call(db, workspace["id"], settings)
+    except GuestLimitExceeded as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="The shared demo model-call allowance has been reached. Please try again tomorrow.",
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from None
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The demo model-call limit is temporarily unavailable.",
+        ) from None
+
+
+def _skill_or_404(db: Session, skill_id: int, workspace_id: str) -> Skill:
+    skill = db.scalar(
+        select(Skill).where(Skill.id == skill_id, Skill.workspace_id == workspace_id)
+    )
     if skill is None:
         raise HTTPException(status_code=404, detail="Skill not found.")
     return skill
@@ -112,16 +137,21 @@ def _validated_steps(request: SkillCreate) -> list[dict]:
 
 
 @router.get("/tools", response_model=list[ToolCatalogItem])
-def list_registered_tools() -> list[ToolCatalogItem]:
+def list_registered_tools(
+    workspace: WorkspaceContext = Depends(require_workspace_access),
+) -> list[ToolCatalogItem]:
     return [ToolCatalogItem.model_validate(item) for item in describe_tools()]
 
 
 @router.post("/tasks", response_model=AgentTaskResponse, status_code=status.HTTP_201_CREATED)
 def submit_task(
     request: AgentTaskCreate,
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> AgentTaskResponse:
-    task = _runtime_operation(lambda: create_task(db, request), db)
+    task = _runtime_operation(
+        lambda: create_task(db, request, workspace_id=workspace["id"]), db
+    )
     return AgentTaskResponse.model_validate(task)
 
 
@@ -132,12 +162,16 @@ def submit_task(
 )
 async def submit_model_planned_task(
     request: AgentTaskPlanRequest,
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> AgentTaskResponse:
     """Persist a model planning attempt, then execute only locally validated tools."""
+    _reserve_guest_provider_quota(db, workspace, settings)
     try:
-        task = await create_model_planned_task(db, request, settings)
+        task = await create_model_planned_task(
+            db, request, settings, workspace_id=workspace["id"]
+        )
     except AgentRuntimeError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.public_message) from None
     except SQLAlchemyError:
@@ -152,6 +186,7 @@ async def submit_model_planned_task(
 @router.get("/tasks", response_model=list[AgentTaskResponse])
 def list_tasks(
     request: Request,
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     task_status: TaskStatus | None = Query(default=None, alias="status"),
@@ -164,7 +199,7 @@ def list_tasks(
             detail="Send history search text in the POST /api/agent/tasks/search body.",
         )
 
-    statement = select(AgentTask)
+    statement = select(AgentTask).where(AgentTask.workspace_id == workspace["id"])
     if task_status:
         statement = statement.where(AgentTask.status == task_status)
     statement = statement.order_by(AgentTask.created_at.desc(), AgentTask.id.desc())
@@ -179,10 +214,11 @@ def list_tasks(
 @router.post("/tasks/search", response_model=list[AgentTaskResponse])
 def search_tasks(
     request: AgentTaskSearchRequest,
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> list[AgentTaskResponse]:
     """Search and filter persisted history without placing task text in the URL."""
-    statement = select(AgentTask)
+    statement = select(AgentTask).where(AgentTask.workspace_id == workspace["id"])
     query = request.q or ""
     if query:
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -204,9 +240,17 @@ def search_tasks(
 @router.get("/tasks/{task_id}", response_model=AgentTaskResponse)
 def get_task(
     task_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> AgentTaskResponse:
-    task = _database_operation(db, lambda: db.get(AgentTask, task_id))
+    task = _database_operation(
+        db,
+        lambda: db.scalar(
+            select(AgentTask).where(
+                AgentTask.id == task_id, AgentTask.workspace_id == workspace["id"]
+            )
+        ),
+    )
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found.")
     return AgentTaskResponse.model_validate(task)
@@ -215,9 +259,17 @@ def get_task(
 @router.get("/tasks/{task_id}/trace", response_model=AgentTaskTraceResponse)
 def get_task_trace(
     task_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> AgentTaskTraceResponse:
-    task = _database_operation(db, lambda: db.get(AgentTask, task_id))
+    task = _database_operation(
+        db,
+        lambda: db.scalar(
+            select(AgentTask).where(
+                AgentTask.id == task_id, AgentTask.workspace_id == workspace["id"]
+            )
+        ),
+    )
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found.")
     events = _database_operation(db, lambda: list(task.trace_events))
@@ -235,11 +287,19 @@ def get_task_trace(
 async def rerun_task(
     request: AgentTaskRerun,
     task_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> AgentTaskResponse:
     """Create a new run from a saved task; never resume old in-memory execution."""
-    source = _database_operation(db, lambda: db.get(AgentTask, task_id))
+    source = _database_operation(
+        db,
+        lambda: db.scalar(
+            select(AgentTask).where(
+                AgentTask.id == task_id, AgentTask.workspace_id == workspace["id"]
+            )
+        ),
+    )
     if source is None:
         raise HTTPException(status_code=404, detail="Task not found.")
     if source.status not in {"completed", "failed"}:
@@ -257,7 +317,9 @@ async def rerun_task(
 
     model_planned = any(event.event_type == "planner_started" for event in source.trace_events)
     if source.skill_id is not None:
-        skill = _database_operation(db, lambda: db.get(Skill, source.skill_id))
+        skill = _database_operation(
+            db, lambda: _skill_or_404(db, source.skill_id, workspace["id"])
+        )
         if skill is None or skill.status != "approved":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -294,6 +356,7 @@ async def rerun_task(
             skill_id=source.skill_id,
         )
     elif model_planned:
+        _reserve_guest_provider_quota(db, workspace, settings)
         rerun_request = AgentTaskPlanRequest(task_input=source.task_input)
         try:
             task = await create_model_planned_task(
@@ -301,6 +364,7 @@ async def rerun_task(
                 rerun_request,
                 settings,
                 rerun_from_task_id=source.id,
+                workspace_id=workspace["id"],
             )
         except AgentRuntimeError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.public_message) from None
@@ -324,7 +388,12 @@ async def rerun_task(
         )
 
     task = _runtime_operation(
-        lambda: create_task(db, rerun_request, rerun_from_task_id=source.id),
+        lambda: create_task(
+            db,
+            rerun_request,
+            rerun_from_task_id=source.id,
+            workspace_id=workspace["id"],
+        ),
         db,
     )
     return AgentTaskResponse.model_validate(task)
@@ -334,17 +403,30 @@ async def rerun_task(
 def approve_or_deny_task(
     request: AgentTaskApproval,
     task_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> AgentTaskResponse:
-    task = _runtime_operation(lambda: decide_task_approval(db, task_id, request.approved), db)
+    task = _runtime_operation(
+        lambda: decide_task_approval(
+            db, task_id, request.approved, workspace_id=workspace["id"]
+        ),
+        db,
+    )
     return AgentTaskResponse.model_validate(task)
 
 
 @skills_router.get("", response_model=list[SkillResponse])
-def list_skills(db: Session = Depends(get_db)) -> list[SkillResponse]:
+def list_skills(
+    workspace: WorkspaceContext = Depends(require_workspace_access),
+    db: Session = Depends(get_db),
+) -> list[SkillResponse]:
     skills = _database_operation(
         db,
-        lambda: db.scalars(select(Skill).order_by(Skill.updated_at.desc(), Skill.id.desc())).all(),
+        lambda: db.scalars(
+            select(Skill)
+            .where(Skill.workspace_id == workspace["id"])
+            .order_by(Skill.updated_at.desc(), Skill.id.desc())
+        ).all(),
     )
     return [SkillResponse.model_validate(skill) for skill in skills]
 
@@ -352,12 +434,14 @@ def list_skills(db: Session = Depends(get_db)) -> list[SkillResponse]:
 @skills_router.post("", response_model=SkillResponse, status_code=status.HTTP_201_CREATED)
 def create_skill(
     request: SkillCreate,
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> SkillResponse:
     steps = _validated_steps(request)
 
     def save() -> Skill:
         skill = Skill(
+            workspace_id=workspace["id"],
             name=request.name,
             description=request.description,
             steps=steps,
@@ -375,19 +459,21 @@ def create_skill(
 @skills_router.get("/{skill_id}", response_model=SkillResponse)
 def get_skill(
     skill_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> SkillResponse:
-    skill = _database_operation(db, lambda: _skill_or_404(db, skill_id))
+    skill = _database_operation(db, lambda: _skill_or_404(db, skill_id, workspace["id"]))
     return SkillResponse.model_validate(skill)
 
 
 @skills_router.post("/{skill_id}/submit", response_model=SkillResponse)
 def submit_skill_for_approval(
     skill_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> SkillResponse:
     def submit() -> Skill:
-        skill = _skill_or_404(db, skill_id)
+        skill = _skill_or_404(db, skill_id, workspace["id"])
         if skill.status != "draft":
             raise HTTPException(status_code=409, detail="Only draft skills can be submitted.")
         skill.status = "pending_approval"
@@ -403,10 +489,11 @@ def submit_skill_for_approval(
 @skills_router.post("/{skill_id}/approve", response_model=SkillResponse)
 def approve_skill(
     skill_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> SkillResponse:
     def approve() -> Skill:
-        skill = _skill_or_404(db, skill_id)
+        skill = _skill_or_404(db, skill_id, workspace["id"])
         if skill.status != "pending_approval":
             raise HTTPException(
                 status_code=409,
@@ -425,10 +512,11 @@ def approve_skill(
 @skills_router.post("/{skill_id}/disable", response_model=SkillResponse)
 def disable_skill(
     skill_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> SkillResponse:
     def disable() -> Skill:
-        skill = _skill_or_404(db, skill_id)
+        skill = _skill_or_404(db, skill_id, workspace["id"])
         skill.status = "disabled"
         skill.updated_at = utc_now()
         db.commit()

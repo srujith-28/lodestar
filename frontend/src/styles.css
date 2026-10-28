@@ -535,3 +535,162 @@ summary { width: fit-content; cursor: pointer; }
   .auth-card { border-radius: 12px; }
   .logout-button { min-height: 29px; padding: 0 8px; font-size: 9px; }
 }
+
+/* Quiet charcoal workspace theme used by the public judge preview and private account. */
+:root {
+  color-scheme: dark;
+  color: #e6e9ed;
+  background: #0b0e12;
+  --ink: #eef1f4;
+  --ink-soft: #c8d0d7;
+  --muted: #9aa5ae;
+  --muted-light: #78838d;
+  --line: #252c33;
+  --line-strong: #343d46;
+  --paper: #0b0e12;
+  --surface: #12171d;
+  --surface-soft: #171d24;
+  --teal: #66c4b1;
+  --teal-dark: #8bd5c5;
+  --teal-soft: #172c2c;
+  --success: #8bd4aa;
+  --success-bg: #172a23;
+  --warning: #e2c27e;
+  --warning-bg: #2b261b;
+  --danger: #ee9b90;
+  --danger-bg: #30201f;
+  --shadow: 0 20px 50px rgba(0, 0, 0, .22);
+}
+body { background: #0b0e12; color: var(--ink-soft); }
+.app-sidebar { background: #10151a; border-color: #222930; }
+.workspace-main { background: radial-gradient(ellipse at 62% 0%, rgba(26, 57, 54, .13), transparent 44%), #0b0e12; }
+.workspace-topbar { border-color: rgba(42, 51, 59, .9); background: rgba(13, 17, 21, .88); }
+.brand-caption, .sidebar-group-label, .sidebar-health-row small, .sidebar-bottom p,
+.workspace-breadcrumb, .workspace-footer, .footer-brand, .metric-caption,
+.metric-label, .eyebrow-label, .card-kicker, .history-task-copy time,
+.activity-row time, .history-updated, .auth-footnote { color: #89949d; }
+.sidebar-link { color: #a4aeb7; }
+.sidebar-link svg { color: #7d8a94; }
+.sidebar-link:hover, .history-task-row:hover, .history-task-row.selected { background: #171e24; color: var(--ink); }
+.sidebar-link.active { border-color: #27413f; background: #182c2b; color: #a5e2d5; }
+.sidebar-health-row strong, .workspace-breadcrumb strong, .footer-brand { color: #d0d7dc; }
+.workspace-type-chip { display: inline-flex; align-items: center; min-height: 21px; margin-left: 3px; padding: 0 7px; border: 1px solid #3b5d54; border-radius: 99px; background: #18302b; color: #a8e2ce; font-size: 8px; font-weight: 700; letter-spacing: .07em; white-space: nowrap; }
+.sidebar-bottom { border-color: #252c33; }
+.workspace-footer { border-color: #252c33; }
+.topbar-status-chip, .logout-button { border-color: #313a43; background: #151b21; color: #bbc4ca; }
+.topbar-status-chip:hover, .logout-button:hover { border-color: #46525c; background: #1b232a; color: #f1f3f5; }
+.topbar-status-chip.success, .topbar-status-chip.warning, .topbar-status-chip.error { background: var(--surface-soft); }
+.mobile-menu-button { border-color: #343d46; background: #151b21; }
+.mobile-menu-button span { background: #c1cbd1; }
+.health-banner { border-color: #2c403b; background: #14201e; }
+.health-banner.offline { border-color: #513330; background: #241918; }
+.health-banner.loading { border-color: #4a4029; background: #211e17; }
+.metric-card, .surface-card { border-color: #252d35; background: rgba(18, 23, 29, .94); box-shadow: 0 4px 18px rgba(0, 0, 0, .08); }
+.metric-card.metric-attention { border-color: #4d422b; background: #1e1c17; }
+.surface-heading { border-color: #252d35; }
+.surface-heading h2, .surface-heading h3 { color: #e3e8ec; }
+.local-only-label, .provider-model-reference code { border-color: #303a41; background: #171e24; color: #a9c9c1; }
+.task-list-row, .activity-row, .history-task-row { border-color: #242c33; }
+.task-row-copy strong, .history-task-copy strong { color: #d1d8dd; }
+.activity-row strong, .history-trace-header strong { color: #c1cbd1; }
+.activity-row > div span { color: #89949d; }
+.quick-links button, .chat-panel, .memory-panel, .agent-panel, .skill-card,
+.history-trace-event, .trace-event, .agent-plan-step, .history-plan-step {
+  border-color: #2a333b;
+  background: #141a20;
+  color: #d0d7dd;
+}
+.quick-links button:hover { border-color: #46615c; background: #182126; }
+.quick-links button > span { color: #86c7b7; }
+.quick-links strong { color: #dce3e7; }
+.button-secondary, .memory-secondary-button, .agent-secondary-button,
+.load-more-button, .icon-button:hover:not(:disabled) {
+  border-color: #39434b;
+  background: #171e24;
+  color: #c5cdd2;
+}
+.button-secondary:hover:not(:disabled), .memory-secondary-button:hover:not(:disabled),
+.agent-secondary-button:hover:not(:disabled), .load-more-button:hover:not(:disabled) { border-color: #52615f; background: #1c252a; }
+.button-primary, .memory-primary-button, .agent-primary-button, .send-button { color: #0b1716; }
+.text-button, .memory-text-button, .agent-text-button { color: #8ed7c7; }
+.text-button:hover:not(:disabled), .memory-text-button:hover:not(:disabled), .agent-text-button:hover:not(:disabled) { background: #1a302f; }
+.icon-button { color: #a4afb7; }
+.icon-button:hover:not(:disabled) { color: #e8edef; }
+.memory-card, .skill-card, .trace-event, .history-trace-event { border-color: #2a333b; background: #141a20; }
+.memory-card-meta, .memory-card-footer, .skill-updated, .trace-event-meta,
+.history-trace-meta { color: #8e9aa3; }
+.memory-content, .skill-card-description, .agent-result-summary { color: #d0d7dd; }
+.memory-category, .sample-data-badge { border-color: #3c5e55; background: #18302b; color: #a8e2ce; }
+.sample-data-badge { display: inline-flex; width: fit-content; align-items: center; padding: 3px 7px; border: 1px solid #3b5d54; border-radius: 99px; font-size: 8px; font-weight: 680; letter-spacing: .03em; white-space: nowrap; }
+.task-row-meta, .history-task-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.guest-workspace-note { display: grid; gap: 4px; margin-bottom: 14px; padding: 10px; border: 1px solid #345249; border-radius: 7px; background: #15231f; }
+.guest-workspace-note strong { color: #b4e6d5; font-size: 10px; }
+.guest-workspace-note span { color: #93aaa1; font-size: 9px; line-height: 1.45; }
+.guest-reset-button { color: #b7cfca; }
+.memory-search, .memory-form, .agent-task-form, .skill-editor, .history-filters {
+  border-color: #2a333b;
+  background: #141a20;
+}
+input, textarea, select, .memory-search input, .memory-form input, .memory-form textarea,
+.agent-task-form input, .agent-task-form textarea, .agent-task-form select,
+.skill-editor input, .skill-editor textarea, .history-filters input, .history-filters select {
+  border-color: #38434c;
+  background: #0f1419;
+  color: #e4e9ed;
+}
+input::placeholder, textarea::placeholder { color: #75828c; }
+.chat-panel-header, .chat-composer, .provider-setup-note, .chat-privacy-note,
+.agent-privacy-note, .memory-privacy-note, .history-runtime-note, .memory-context-note {
+  border-color: #2a333b;
+  background: #11171d;
+  color: #9aa6ae;
+}
+.chat-panel-title strong, .message-author { color: #a4b2b9; }
+.chat-transcript { background: #0e1318; }
+.chat-message.user { border-color: #35504b; background: #182724; }
+.chat-message.assistant { border-color: #2c353c; background: #171d23; }
+.chat-message p { color: #dbe1e5; }
+.chat-empty, .memory-state, .agent-empty, .history-state { color: #9aa5ae; }
+.chat-empty strong, .memory-state strong, .agent-empty strong, .history-state strong { color: #e1e6e9; }
+.prompt-suggestions button { border-color: #344047; background: #151c22; color: #b8c2c8; }
+.prompt-suggestions button:hover { border-color: #47645d; background: #192724; }
+.agent-notice, .history-result, .agent-inline-note { border-color: #35423f; background: #17201f; color: #b7cbc4; }
+.agent-notice.error, .chat-error, .memory-notice.error { border-color: #513330; background: #261a19; color: #efa59a; }
+.approval-box, .history-approval { border-color: #55472c; background: #211e17; }
+.approval-box strong, .approval-box p { color: #dfcc9c; }
+.status-badge, .agent-status, .skill-status, .step-status { border-color: #343e46; background: #1a2026; color: #bac4ca; }
+.status-badge.completed, .agent-status.completed, .skill-status.approved, .step-status.completed { border-color: #315341; background: #17271f; color: #a6dbb8; }
+.status-badge.failed, .agent-status.failed, .skill-status.disabled, .step-status.failed { border-color: #573630; background: #2b1d1b; color: #edaaa0; }
+.status-badge.awaiting_approval, .agent-status.awaiting_approval, .skill-status.pending_approval, .step-status.awaiting_approval, .step-status.pending { border-color: #56482e; background: #292318; color: #e5ca8e; }
+.status-badge.running, .agent-status.running, .step-status.running { border-color: #34485a; background: #19232c; color: #a6c9df; }
+.status-badge.pending, .agent-status.pending, .skill-status.draft, .step-status.denied { border-color: #343e46; background: #1a2026; color: #a9b3b9; }
+.auth-shell { background: radial-gradient(ellipse at 50% 30%, #172522 0, #0d1115 58%, #090c10 100%); }
+.auth-card { border-color: #303a41; background: rgba(18, 23, 29, .96); box-shadow: 0 26px 75px rgba(0, 0, 0, .32); }
+.auth-brand, .auth-card h1 { color: #edf1f4; }
+.auth-brand-mark { border-color: #34554e; color: #80d2c1; }
+.auth-copy, .auth-guidance span { color: #a1adb5; }
+.auth-form label, .auth-guidance strong { color: #c8d0d5; }
+.auth-form input { border-color: #39444c; background: #0f1419; color: #edf1f4; }
+.auth-footer { border-color: #2a333b; color: #84919a; }
+.auth-guidance, .guest-entry-card { border: 1px solid #2c3d3b; border-radius: 9px; background: #151d20; }
+.guest-entry-card { margin: 4px 0 17px; padding: 16px; }
+.auth-divider { display: flex; align-items: center; gap: 12px; margin: 24px 0 17px; color: #84919a; font-size: 8px; font-weight: 700; letter-spacing: .12em; }
+.auth-divider::before, .auth-divider::after { height: 1px; flex: 1; background: #2b343b; content: ""; }
+.explore-demo-button { min-height: 46px; font-size: 12px; }
+.auth-spinner { border-color: #2a3b39; border-top-color: #83d6c5; }
+.logout-error { border-color: #543633; background: #251a19; color: #efa69c; }
+
+@media (max-width: 880px) {
+  .app-sidebar { background: #10151a; box-shadow: 18px 0 50px rgba(0, 0, 0, .36); }
+  .sidebar-backdrop { background: rgba(0, 0, 0, .58); }
+}
+
+@media (max-width: 640px) {
+  .workspace-topbar { gap: 7px; }
+  .workspace-breadcrumb { min-width: 0; flex: 1; }
+  .topbar-status { gap: 4px; }
+  .topbar-status-chip { width: 29px; min-width: 29px; padding: 0; }
+  .logout-button { min-width: 0; padding: 0 7px; }
+  .guest-reset-button { width: 42px; padding: 0 4px; font-size: 0; }
+  .guest-reset-button::after { content: "Reset"; font-size: 9px; }
+}

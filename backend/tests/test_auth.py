@@ -165,11 +165,13 @@ def test_session_status_and_private_routes_fail_closed_when_unconfigured(monkeyp
         assert client.get("/api/auth/session").json() == {
             "configured": False,
             "authenticated": False,
+            "demo_enabled": False,
+            "workspace_type": None,
         }
         assert client.get("/api/provider/status").status_code == 503
 
 
-def test_production_requires_auth_settings_and_uses_secure_cookies(monkeypatch) -> None:
+def test_production_requires_auth_settings_and_uses_secure_cookies(monkeypatch, tmp_path) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, app_env="production")
 
@@ -193,8 +195,19 @@ def test_production_requires_auth_settings_and_uses_secure_cookies(monkeypatch) 
     from fastapi.testclient import TestClient as SecureTestClient
 
     from app.core.config import get_settings as settings_dependency
+    test_engine = create_engine(
+        f"sqlite:///{(tmp_path / 'production-auth.sqlite3').as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=test_engine)
+    test_sessions = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
+
+    def override_get_db() -> Iterator[Session]:
+        with test_sessions() as session:
+            yield session
 
     monkeypatch.setitem(app.dependency_overrides, settings_dependency, lambda: settings)
+    monkeypatch.setitem(app.dependency_overrides, get_db, override_get_db)
     with SecureTestClient(app, base_url="https://testserver") as client:
         csrf = obtain_csrf(client)
         response = client.post(
@@ -208,6 +221,31 @@ def test_production_requires_auth_settings_and_uses_secure_cookies(monkeypatch) 
     assert "secure" in set_cookie
     assert "httponly" in set_cookie
     assert "samesite=lax" in set_cookie
+    test_engine.dispose()
+
+
+def test_guest_only_production_configuration_requires_session_secret_and_postgres() -> None:
+    guest_only = Settings(
+        _env_file=None,
+        app_env="development",
+        guest_demo_enabled=True,
+        lodestar_session_secret=SecretStr(TEST_SESSION_SECRET),
+    )
+    assert guest_only.guest_demo_enabled is True
+    assert guest_only.auth_configured is False
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, guest_demo_enabled=True)
+
+    production_guest = Settings(
+        _env_file=None,
+        app_env="production",
+        database_url=TEST_POSTGRES_URL,
+        cors_origins="https://demo.example",
+        guest_demo_enabled=True,
+        lodestar_session_secret=SecretStr(TEST_SESSION_SECRET),
+    )
+    assert production_guest.secure_cookies is True
 
 
 def test_login_password_length_configuration_matches_endpoint_limit() -> None:
@@ -291,6 +329,8 @@ def test_logout_revokes_a_copied_session_token(auth_client: TestClient) -> None:
     assert auth_client.get("/api/auth/session").json() == {
         "configured": True,
         "authenticated": False,
+        "demo_enabled": False,
+        "workspace_type": None,
     }
 
 

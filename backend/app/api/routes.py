@@ -6,16 +6,17 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.api.schemas import ChatRequest, ChatResponse
 from app.core.config import Settings, get_settings
-from app.core.security import require_authenticated
-from app.database import engine
+from app.core.security import WorkspaceContext, require_workspace_access
+from app.database import engine, get_db
 from app.services.nebius import ChatProviderError, generate_reply
 
 
 router = APIRouter()
-api_router = APIRouter(prefix="/api", dependencies=[Depends(require_authenticated)])
+api_router = APIRouter(prefix="/api", dependencies=[Depends(require_workspace_access)])
 
 
 class HealthResponse(BaseModel):
@@ -56,9 +57,28 @@ def health_check() -> HealthResponse:
 @api_router.post("/chat", response_model=ChatResponse, tags=["chat"])
 async def chat(
     request: ChatRequest,
+    workspace: WorkspaceContext = Depends(require_workspace_access),
+    db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> ChatResponse:
     """Forward validated chat history to the configured Nebius model."""
+    if workspace["is_guest"] and settings.nebius_api_key and settings.nebius_model_id:
+        from app.services.demo_usage import GuestLimitExceeded, reserve_guest_provider_call
+
+        try:
+            reserve_guest_provider_call(db, workspace["id"], settings)
+        except GuestLimitExceeded as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="The shared demo model-call allowance has been reached. Please try again tomorrow.",
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from None
+        except SQLAlchemyError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The demo model-call limit is temporarily unavailable.",
+            ) from None
     try:
         reply = await generate_reply(request.messages, settings)
     except ChatProviderError as exc:

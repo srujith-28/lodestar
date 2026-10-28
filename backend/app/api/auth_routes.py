@@ -19,6 +19,8 @@ from app.core.security import (
     CSRF_HEADER,
     SESSION_COOKIE,
     SESSION_MAX_AGE_SECONDS,
+    GUEST_WORKSPACE_PREFIX,
+    PERSONAL_WORKSPACE_ID,
     SessionClaims,
     constant_time_equal,
     has_active_session,
@@ -30,6 +32,7 @@ from app.core.security import (
     require_authenticated,
 )
 from app.models import AuthSession
+from app.models import Workspace
 from app.services.auth_rate_limit import (
     LoginRateLimiterUnavailable,
     clear_login_attempts,
@@ -44,6 +47,8 @@ router = APIRouter(prefix="/api/auth", tags=["authentication"])
 class SessionResponse(BaseModel):
     configured: bool
     authenticated: bool
+    demo_enabled: bool
+    workspace_type: str | None
 
 
 class CsrfResponse(BaseModel):
@@ -59,6 +64,7 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     authenticated: bool
     csrf_token: str
+    workspace_type: str
 
 
 def _no_store(response: Response) -> None:
@@ -71,6 +77,14 @@ def _require_auth_configuration(settings: Settings) -> None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Demo authentication is not configured. Set LODESTAR_AUTH_PASSWORD and LODESTAR_SESSION_SECRET.",
+        )
+
+
+def _require_session_secret(settings: Settings) -> None:
+    if settings.lodestar_session_secret is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Demo session signing is not configured on the backend.",
         )
 
 
@@ -113,13 +127,28 @@ def session_status(
     settings: Settings = Depends(get_settings),
 ) -> SessionResponse:
     _no_store(response)
-    if not settings.auth_configured:
-        return SessionResponse(configured=False, authenticated=False)
+    if settings.lodestar_session_secret is None:
+        return SessionResponse(
+            configured=settings.auth_configured,
+            authenticated=False,
+            demo_enabled=settings.guest_demo_enabled,
+            workspace_type=None,
+        )
     claims = read_session(request.cookies.get(SESSION_COOKIE), settings)
     authenticated = bool(
-        claims is not None and has_active_session(claims["session_id"], db, settings)
+        claims is not None and has_active_session(
+            claims["session_id"], db, settings, workspace_id=claims["workspace_id"]
+        )
     )
-    return SessionResponse(configured=True, authenticated=authenticated)
+    workspace_type = None
+    if authenticated and claims is not None:
+        workspace_type = "guest" if claims["workspace_id"].startswith(GUEST_WORKSPACE_PREFIX) else "personal"
+    return SessionResponse(
+        configured=settings.auth_configured,
+        authenticated=authenticated,
+        demo_enabled=settings.guest_demo_enabled,
+        workspace_type=workspace_type,
+    )
 
 
 @router.get("/csrf", response_model=CsrfResponse)
@@ -130,12 +159,14 @@ def csrf_token(
     settings: Settings = Depends(get_settings),
 ) -> CsrfResponse:
     _no_store(response)
-    _require_auth_configuration(settings)
+    _require_session_secret(settings)
     if not request_origin_is_allowed(request, settings):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request origin is not allowed.")
 
     claims = read_session(request.cookies.get(SESSION_COOKIE), settings)
-    if claims is not None and not has_active_session(claims["session_id"], db, settings):
+    if claims is not None and not has_active_session(
+        claims["session_id"], db, settings, workspace_id=claims["workspace_id"]
+    ):
         claims = None
     token = claims["csrf_token"] if claims is not None else new_csrf_token()
     _set_csrf_cookie(response, token, settings)
@@ -192,6 +223,7 @@ def login(
         db.add(
             AuthSession(
                 session_id_hash=keyed_identifier_hash(session_id, settings, purpose="session"),
+                workspace_id=PERSONAL_WORKSPACE_ID,
                 expires_at_epoch=now + SESSION_MAX_AGE_SECONDS,
             )
         )
@@ -202,11 +234,136 @@ def login(
 
     _set_session_cookie(
         response,
-        issue_session(rotated_csrf, session_id, settings, issued_at=now),
+        issue_session(
+            rotated_csrf,
+            session_id,
+            settings,
+            workspace_id=PERSONAL_WORKSPACE_ID,
+            issued_at=now,
+        ),
         settings,
     )
     _set_csrf_cookie(response, rotated_csrf, settings)
-    return LoginResponse(authenticated=True, csrf_token=rotated_csrf)
+    return LoginResponse(
+        authenticated=True,
+        csrf_token=rotated_csrf,
+        workspace_type="personal",
+    )
+
+
+@router.post("/demo", response_model=LoginResponse)
+def start_guest_demo(
+    request: Request,
+    response: Response,
+    csrf_header: str | None = Header(default=None, alias=CSRF_HEADER),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> LoginResponse:
+    """Create an isolated, seeded guest workspace without changing personal data."""
+    _no_store(response)
+    if not settings.guest_demo_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Guest demo is unavailable.")
+    _require_session_secret(settings)
+    if not request_origin_is_allowed(request, settings):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request origin is not allowed.")
+    csrf_cookie = request.cookies.get(CSRF_COOKIE, "")
+    if not csrf_header or not constant_time_equal(csrf_header, csrf_cookie):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF validation failed.")
+
+    existing = read_session(request.cookies.get(SESSION_COOKIE), settings)
+    if existing is not None and has_active_session(
+        existing["session_id"],
+        db,
+        settings,
+        workspace_id=existing["workspace_id"],
+    ):
+        if existing["workspace_id"].startswith(GUEST_WORKSPACE_PREFIX):
+            return LoginResponse(
+                authenticated=True,
+                csrf_token=existing["csrf_token"],
+                workspace_type="guest",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Sign out of the private workspace before opening the guest demo.",
+        )
+
+    from app.services.auth_rate_limit import (
+        LoginRateLimiterUnavailable,
+        login_client_key,
+        reserve_login_attempt,
+    )
+    from app.services.demo_workspace import seed_guest_workspace
+    bootstrap_key = keyed_identifier_hash(
+        login_client_key(request, settings), settings, purpose="guest-session-bootstrap"
+    )
+    try:
+        retry_after = reserve_login_attempt(
+            db,
+            bootstrap_key,
+            settings,
+            max_attempts=settings.guest_session_rate_limit_max_attempts,
+            window_seconds=settings.login_rate_limit_window_seconds,
+        )
+    except (LoginRateLimiterUnavailable, SQLAlchemyError):
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Guest demo access is temporarily unavailable.",
+        ) from None
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many guest sessions were created from this connection. Please wait and try again.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    workspace_id = GUEST_WORKSPACE_PREFIX + secrets.token_urlsafe(24)
+    session_id = secrets.token_urlsafe(32)
+    csrf_token = new_csrf_token()
+    now = int(time.time())
+    try:
+        db.execute(delete(AuthSession).where(AuthSession.expires_at_epoch <= now))
+        db.add(
+            Workspace(
+                id=workspace_id,
+                kind="guest",
+                seed_version=0,
+                delete_after_epoch=(
+                    now
+                    + SESSION_MAX_AGE_SECONDS
+                    + settings.guest_data_retention_days * 86_400
+                ),
+            )
+        )
+        db.commit()
+        seed_guest_workspace(db, workspace_id)
+        db.add(
+            AuthSession(
+                session_id_hash=keyed_identifier_hash(session_id, settings, purpose="session"),
+                workspace_id=workspace_id,
+                expires_at_epoch=now + SESSION_MAX_AGE_SECONDS,
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The guest workspace could not be prepared. Please retry.",
+        ) from None
+
+    _set_session_cookie(
+        response,
+        issue_session(csrf_token, session_id, settings, workspace_id=workspace_id, issued_at=now),
+        settings,
+    )
+    _set_csrf_cookie(response, csrf_token, settings)
+    return LoginResponse(
+        authenticated=True,
+        csrf_token=csrf_token,
+        workspace_type="guest",
+    )
 
 
 @router.post("/logout")

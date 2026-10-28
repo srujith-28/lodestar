@@ -44,7 +44,7 @@ class ToolDefinition:
     permission_level: str
     requires_approval: bool
     input_model: Type[BaseModel]
-    execute: Callable[[Session, BaseModel], Any]
+    execute: Callable[[Session, BaseModel, str], Any]
 
 
 class UnknownToolError(ValueError):
@@ -55,9 +55,9 @@ class InvalidToolInputError(ValueError):
     """Raised when a registered tool input does not match its schema."""
 
 
-def _search_memories(db: Session, payload: BaseModel) -> dict[str, Any]:
+def _search_memories(db: Session, payload: BaseModel, workspace_id: str) -> dict[str, Any]:
     request = MemorySearchToolInput.model_validate(payload.model_dump())
-    matches = search_memory_rows(db, request.query, request.limit)
+    matches = search_memory_rows(db, request.query, request.limit, workspace_id=workspace_id)
     return {
         "count": len(matches),
         "matches": [
@@ -67,13 +67,13 @@ def _search_memories(db: Session, payload: BaseModel) -> dict[str, Any]:
     }
 
 
-def _current_datetime(_: Session, __: BaseModel) -> dict[str, str]:
+def _current_datetime(_: Session, __: BaseModel, ___: str) -> dict[str, str]:
     return {"utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
 
 
-def _save_memory(db: Session, payload: BaseModel) -> dict[str, Any]:
+def _save_memory(db: Session, payload: BaseModel, workspace_id: str) -> dict[str, Any]:
     request = MemoryCreate.model_validate(payload.model_dump())
-    memory = Memory(**request.model_dump())
+    memory = Memory(workspace_id=workspace_id, **request.model_dump())
     try:
         db.add(memory)
         db.commit()

@@ -20,6 +20,8 @@ class Memory(Base):
     __tablename__ = "memories"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    workspace_id: Mapped[str] = mapped_column(String(80), nullable=False, default="personal")
+    is_sample: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str] = mapped_column(String(60), nullable=False, default="general")
     source: Mapped[str] = mapped_column(String(80), nullable=False, default="user")
@@ -37,6 +39,8 @@ class AgentTask(Base):
     __tablename__ = "agent_tasks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    workspace_id: Mapped[str] = mapped_column(String(80), nullable=False, default="personal")
+    is_sample: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     skill_id: Mapped[int | None] = mapped_column(ForeignKey("skills.id"), nullable=True, index=True)
     task_input: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
@@ -82,6 +86,7 @@ class Skill(Base):
     __tablename__ = "skills"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    workspace_id: Mapped[str] = mapped_column(String(80), nullable=False, default="personal")
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     description: Mapped[str] = mapped_column(String(500), nullable=False)
     steps: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
@@ -100,6 +105,7 @@ class AuthSession(Base):
     __tablename__ = "auth_sessions"
 
     session_id_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(80), nullable=False, default="personal")
     expires_at_epoch: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
@@ -114,3 +120,29 @@ class AuthLoginRateLimit(Base):
     client_key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     window_started_at_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class Workspace(Base):
+    """A private personal workspace or an isolated guest demo workspace."""
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    seed_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    delete_after_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class GuestUsage(Base):
+    """Persistent request and provider-call counters for one guest scope."""
+
+    __tablename__ = "guest_usage"
+
+    scope_key: Mapped[str] = mapped_column(String(96), primary_key=True)
+    request_window_started_at_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    provider_window_started_at_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

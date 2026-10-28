@@ -1,16 +1,28 @@
 """Health endpoint integration test."""
 
+from collections.abc import Iterator
+
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 
 from app.core.config import Settings
 from app.main import app, create_app
 
 
-client = TestClient(app)
+@pytest.fixture
+def isolated_health_engine(tmp_path, monkeypatch) -> Iterator[None]:
+    from app.api import routes
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'health.sqlite3').as_posix()}")
+    monkeypatch.setattr(routes, "engine", engine)
+    yield
+    engine.dispose()
 
 
-def test_health_reports_api_and_database_as_healthy() -> None:
-    response = client.get("/health")
+def test_health_reports_api_and_database_as_healthy(isolated_health_engine) -> None:
+    with TestClient(app) as client:
+        response = client.get("/health")
 
     assert response.status_code == 200
     payload = response.json()

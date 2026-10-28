@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import status
 from pydantic import BaseModel
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from app.api.agent_schemas import AgentTaskCreate, AgentTaskPlanRequest
 from app.api.memory_schemas import contains_credential
 from app.core.config import Settings
 from app.models import AgentTask, AgentTraceEvent, Skill, utc_now
+from app.core.security import PERSONAL_WORKSPACE_ID
 from app.services.agent_planner import PlanValidationError, planner_system_prompt, validate_model_plan
 from app.services.nebius import ChatProviderError, generate_planner_completion
 from app.services.tool_registry import (
@@ -100,7 +101,9 @@ def _prepare_step(tool_name: str, tool_input: dict[str, Any], description: str |
     )
 
 
-def _prepare_task_steps(db: Session, request: AgentTaskCreate) -> tuple[int | None, list[RuntimeStep]]:
+def _prepare_task_steps(
+    db: Session, request: AgentTaskCreate, workspace_id: str
+) -> tuple[int | None, list[RuntimeStep]]:
     if request.tool_name is not None:
         return None, [_prepare_step(request.tool_name, request.tool_input)]
 
@@ -109,7 +112,9 @@ def _prepare_task_steps(db: Session, request: AgentTaskCreate) -> tuple[int | No
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Choose one registered tool or approved skill.",
         )
-    skill = db.get(Skill, request.skill_id)
+    skill = db.scalar(
+        select(Skill).where(Skill.id == request.skill_id, Skill.workspace_id == workspace_id)
+    )
     if skill is None:
         raise AgentRuntimeError(status.HTTP_404_NOT_FOUND, "Skill not found.")
     if skill.status != "approved":
@@ -146,10 +151,12 @@ def create_task(
     request: AgentTaskCreate,
     *,
     rerun_from_task_id: int | None = None,
+    workspace_id: str = PERSONAL_WORKSPACE_ID,
 ) -> AgentTask:
-    skill_id, steps = _prepare_task_steps(db, request)
+    skill_id, steps = _prepare_task_steps(db, request, workspace_id)
     plan = [_step_plan(index, step) for index, step in enumerate(steps)]
     task = AgentTask(
+        workspace_id=workspace_id,
         skill_id=skill_id,
         task_input=request.task_input,
         status="pending",
@@ -184,7 +191,14 @@ def create_task(
     )
     db.commit()
     db.refresh(task)
-    return _run_steps(db, task.id, steps, start_index=0, approval_granted=False)
+    return _run_steps(
+        db,
+        task.id,
+        steps,
+        start_index=0,
+        approval_granted=False,
+        workspace_id=workspace_id,
+    )
 
 
 async def create_model_planned_task(
@@ -193,9 +207,11 @@ async def create_model_planned_task(
     settings: Settings,
     *,
     rerun_from_task_id: int | None = None,
+    workspace_id: str = PERSONAL_WORKSPACE_ID,
 ) -> AgentTask:
     """Persist a Nebius planning attempt, validate it locally, then use the same executor."""
     task = AgentTask(
+        workspace_id=workspace_id,
         skill_id=None,
         task_input=request.task_input,
         status="running",
@@ -252,6 +268,7 @@ async def create_model_planned_task(
             reason="provider_error",
             public_message=exc.public_message,
             provider_status=exc.status_code,
+            workspace_id=workspace_id,
         )
     except PlanValidationError as exc:
         return _fail_planning(
@@ -259,6 +276,7 @@ async def create_model_planned_task(
             task.id,
             reason=exc.reason,
             public_message=exc.public_message,
+            workspace_id=workspace_id,
         )
     except AgentRuntimeError:
         return _fail_planning(
@@ -266,6 +284,7 @@ async def create_model_planned_task(
             task.id,
             reason="registry_validation",
             public_message="The proposed plan no longer matches the local tool registry. No tools were executed.",
+            workspace_id=workspace_id,
         )
     except SQLAlchemyError:
         db.rollback()
@@ -276,9 +295,12 @@ async def create_model_planned_task(
             task.id,
             reason="provider_error",
             public_message="Nebius planning failed unexpectedly. No tools were executed.",
+            workspace_id=workspace_id,
         )
 
-    task = db.get(AgentTask, task.id)
+    task = db.scalar(
+        select(AgentTask).where(AgentTask.id == task.id, AgentTask.workspace_id == workspace_id)
+    )
     if task is None:
         raise AgentRuntimeError(status.HTTP_404_NOT_FOUND, "Task not found.")
     plan = [_step_plan(index, step) for index, step in enumerate(steps)]
@@ -305,7 +327,14 @@ async def create_model_planned_task(
     )
     db.commit()
     db.refresh(task)
-    return _run_steps(db, task.id, steps, start_index=0, approval_granted=False)
+    return _run_steps(
+        db,
+        task.id,
+        steps,
+        start_index=0,
+        approval_granted=False,
+        workspace_id=workspace_id,
+    )
 
 
 def _fail_planning(
@@ -315,8 +344,11 @@ def _fail_planning(
     reason: str,
     public_message: str,
     provider_status: int | None = None,
+    workspace_id: str = PERSONAL_WORKSPACE_ID,
 ) -> AgentTask:
-    task = db.get(AgentTask, task_id)
+    task = db.scalar(
+        select(AgentTask).where(AgentTask.id == task_id, AgentTask.workspace_id == workspace_id)
+    )
     if task is None:
         raise AgentRuntimeError(status.HTTP_404_NOT_FOUND, "Task not found.")
     task.status = "failed"
@@ -354,12 +386,20 @@ def _run_steps(
     *,
     start_index: int,
     approval_granted: bool,
+    workspace_id: str = PERSONAL_WORKSPACE_ID,
 ) -> AgentTask:
-    task = db.get(AgentTask, task_id)
+    task = db.scalar(
+        select(AgentTask).where(AgentTask.id == task_id, AgentTask.workspace_id == workspace_id)
+    )
     if task is None:
         raise AgentRuntimeError(status.HTTP_404_NOT_FOUND, "Task not found.")
     if task.skill_id is not None:
-        skill = db.get(Skill, task.skill_id)
+        skill = db.scalar(
+            select(Skill).where(
+                Skill.id == task.skill_id,
+                Skill.workspace_id == workspace_id,
+            )
+        )
         if skill is None or skill.status != "approved":
             task.status = "failed"
             task.result_summary = "The selected skill is no longer approved."
@@ -428,10 +468,15 @@ def _run_steps(
         db.commit()
 
         try:
-            result = step.tool.execute(db, step.validated_input)
+            result = step.tool.execute(db, step.validated_input, workspace_id)
         except Exception:
             db.rollback()
-            task = db.get(AgentTask, task_id)
+            task = db.scalar(
+                select(AgentTask).where(
+                    AgentTask.id == task_id,
+                    AgentTask.workspace_id == workspace_id,
+                )
+            )
             if task is None:
                 raise AgentRuntimeError(status.HTTP_404_NOT_FOUND, "Task not found.") from None
             plan = [dict(item) for item in task.plan_steps]
@@ -479,7 +524,12 @@ def _run_steps(
             message="Registered local tool completed.",
         )
         db.commit()
-        task = db.get(AgentTask, task_id)
+        task = db.scalar(
+            select(AgentTask).where(
+                AgentTask.id == task_id,
+                AgentTask.workspace_id == workspace_id,
+            )
+        )
         if task is None:
             raise AgentRuntimeError(status.HTTP_404_NOT_FOUND, "Task not found.")
         plan = [dict(item) for item in task.plan_steps]
@@ -499,8 +549,16 @@ def _run_steps(
     return task
 
 
-def decide_task_approval(db: Session, task_id: int, approved: bool) -> AgentTask:
-    task = db.get(AgentTask, task_id)
+def decide_task_approval(
+    db: Session,
+    task_id: int,
+    approved: bool,
+    *,
+    workspace_id: str = PERSONAL_WORKSPACE_ID,
+) -> AgentTask:
+    task = db.scalar(
+        select(AgentTask).where(AgentTask.id == task_id, AgentTask.workspace_id == workspace_id)
+    )
     if task is None:
         raise AgentRuntimeError(status.HTTP_404_NOT_FOUND, "Task not found.")
     if task.status != "awaiting_approval":
@@ -521,7 +579,12 @@ def decide_task_approval(db: Session, task_id: int, approved: bool) -> AgentTask
         )
 
     if approved and task.skill_id is not None:
-        skill = db.get(Skill, task.skill_id)
+        skill = db.scalar(
+            select(Skill).where(
+                Skill.id == task.skill_id,
+                Skill.workspace_id == workspace_id,
+            )
+        )
         if skill is None or skill.status != "approved":
             task.status = "failed"
             task.result_summary = "The selected skill is no longer approved."
@@ -543,7 +606,11 @@ def decide_task_approval(db: Session, task_id: int, approved: bool) -> AgentTask
     claimed_status = "running" if approved else "failed"
     claim = db.execute(
         update(AgentTask)
-        .where(AgentTask.id == task_id, AgentTask.status == "awaiting_approval")
+        .where(
+            AgentTask.id == task_id,
+            AgentTask.workspace_id == workspace_id,
+            AgentTask.status == "awaiting_approval",
+        )
         .values(status=claimed_status, updated_at=utc_now())
     )
     if claim.rowcount != 1:
@@ -602,4 +669,11 @@ def decide_task_approval(db: Session, task_id: int, approved: bool) -> AgentTask
         )
         for plan_step in plan
     ]
-    return _run_steps(db, task_id, steps, start_index=waiting_index, approval_granted=True)
+    return _run_steps(
+        db,
+        task_id,
+        steps,
+        start_index=waiting_index,
+        approval_granted=True,
+        workspace_id=workspace_id,
+    )

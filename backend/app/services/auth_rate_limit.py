@@ -63,11 +63,15 @@ def reserve_login_attempt(
     settings: Settings,
     *,
     now: int | None = None,
+    max_attempts: int | None = None,
+    window_seconds: int | None = None,
 ) -> int | None:
     """Atomically reserve one attempt; return Retry-After seconds when blocked."""
     current_time = int(time.time()) if now is None else now
-    window_seconds = settings.login_rate_limit_window_seconds
-    max_attempts = settings.login_rate_limit_max_attempts
+    window_seconds = window_seconds or settings.login_rate_limit_window_seconds
+    max_attempts = max_attempts or settings.login_rate_limit_max_attempts
+    if window_seconds < 1 or max_attempts < 1:
+        raise ValueError("Rate-limit policy values must be positive.")
     bucket = AuthLoginRateLimit.__table__
     window_expired = bucket.c.window_started_at_epoch <= current_time - window_seconds
 

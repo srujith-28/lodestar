@@ -6,6 +6,7 @@ type TaskStatus = "pending" | "running" | "completed" | "failed" | "awaiting_app
 type TaskFilterStatus = TaskStatus | "all";
 type Task = {
   id: number;
+  is_sample: boolean;
   skill_id: number | null;
   task_input: string;
   status: TaskStatus;
@@ -335,7 +336,7 @@ export function HistoryView({ apiBaseUrl, initialTaskId, onNavigate }: HistoryVi
                   onClick={() => void loadTrace(task.id)}
                   aria-current={selectedTask?.id === task.id ? "true" : undefined}
                 >
-                  <span className="history-task-copy"><strong>{task.task_input}</strong><time dateTime={task.created_at}>{formatTime(task.created_at)}</time></span>
+                  <span className="history-task-copy"><strong>{task.task_input}</strong><span className="history-task-meta">{task.is_sample && <span className="sample-data-badge">Sample data</span>}<time dateTime={task.created_at}>{formatTime(task.created_at)}</time></span></span>
                   <span className={`status-badge ${task.status}`}>{task.status.replaceAll("_", " ")}</span>
                 </button>
               ))}

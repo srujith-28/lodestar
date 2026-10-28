@@ -26,4 +26,4 @@ RUN groupadd --system lodestar \
 
 WORKDIR /app/backend
 USER lodestar
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --no-proxy-headers"]

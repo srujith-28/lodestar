@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 from app.models import Memory
 
 
-def search_memory_rows(db: Session, query: str, limit: int) -> list[Memory]:
+def search_memory_rows(
+    db: Session, query: str, limit: int, *, workspace_id: str = "personal"
+) -> list[Memory]:
     """Return memories containing every query term in content, category, or source."""
     term_conditions = []
     for term in query.strip().split():
@@ -22,7 +24,7 @@ def search_memory_rows(db: Session, query: str, limit: int) -> list[Memory]:
 
     statement = (
         select(Memory)
-        .where(and_(*term_conditions))
+        .where(Memory.workspace_id == workspace_id, and_(*term_conditions))
         .order_by(Memory.updated_at.desc(), Memory.id.desc())
         .limit(limit)
     )

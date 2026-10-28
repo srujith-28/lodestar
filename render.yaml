@@ -28,6 +28,20 @@ services:
         value: "5"
       - key: LOGIN_RATE_LIMIT_WINDOW_SECONDS
         value: "900"
+      - key: GUEST_DEMO_ENABLED
+        value: "true"
+      - key: GUEST_SESSION_RATE_LIMIT_MAX_ATTEMPTS
+        value: "40"
+      - key: GUEST_DATA_RETENTION_DAYS
+        value: "7"
+      - key: GUEST_API_RATE_LIMIT_MAX_REQUESTS
+        value: "120"
+      - key: GUEST_API_RATE_LIMIT_WINDOW_SECONDS
+        value: "60"
+      - key: GUEST_PROVIDER_CALLS_PER_WORKSPACE_PER_DAY
+        value: "8"
+      - key: GUEST_PROVIDER_CALLS_GLOBAL_PER_DAY
+        value: "40"
       # Do not configure TRUSTED_PROXY_CIDRS until the inbound proxy trust range
       # and X-Forwarded-For sanitization behavior are verified for this service.
 

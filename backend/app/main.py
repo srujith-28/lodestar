@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.agent_routes import router as agent_router, skills_router
 from app.api.auth_routes import router as auth_router
+from app.api.demo_routes import router as demo_router
 from app.api.memory_routes import router as memory_router
 from app.api.overview_routes import router as overview_router
 from app.api.routes import api_router, router
@@ -46,6 +47,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     application.include_router(router)
     application.include_router(auth_router)
+    application.include_router(demo_router)
     application.include_router(api_router)
     application.include_router(memory_router)
     application.include_router(overview_router)

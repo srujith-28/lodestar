@@ -10,14 +10,14 @@ from sqlalchemy.orm import Session
 
 from app.api.agent_schemas import AgentTaskResponse
 from app.database import get_db
-from app.core.security import require_authenticated
+from app.core.security import WorkspaceContext, require_workspace_access
 from app.models import AgentTask, AgentTraceEvent, Memory
 
 
 router = APIRouter(
     prefix="/api",
     tags=["overview"],
-    dependencies=[Depends(require_authenticated)],
+    dependencies=[Depends(require_workspace_access)],
 )
 
 
@@ -42,24 +42,34 @@ class OverviewResponse(BaseModel):
 
 
 @router.get("/overview", response_model=OverviewResponse)
-def get_overview(db: Session = Depends(get_db)) -> OverviewResponse:
+def get_overview(
+    workspace: WorkspaceContext = Depends(require_workspace_access),
+    db: Session = Depends(get_db),
+) -> OverviewResponse:
     """Return counts and recent persisted local activity; never calls a provider."""
     try:
-        memory_count = db.scalar(select(func.count()).select_from(Memory)) or 0
-        task_count = db.scalar(select(func.count()).select_from(AgentTask)) or 0
+        memory_count = db.scalar(
+            select(func.count()).select_from(Memory).where(Memory.workspace_id == workspace["id"])
+        ) or 0
+        task_count = db.scalar(
+            select(func.count()).select_from(AgentTask).where(AgentTask.workspace_id == workspace["id"])
+        ) or 0
         pending_approval_count = db.scalar(
             select(func.count()).select_from(AgentTask).where(
-                AgentTask.status == "awaiting_approval"
+                AgentTask.status == "awaiting_approval",
+                AgentTask.workspace_id == workspace["id"],
             )
         ) or 0
         recent_tasks = db.scalars(
             select(AgentTask)
+            .where(AgentTask.workspace_id == workspace["id"])
             .order_by(AgentTask.created_at.desc(), AgentTask.id.desc())
             .limit(5)
         ).all()
         recent_activity = db.scalars(
             select(AgentTraceEvent)
             .join(AgentTask, AgentTask.id == AgentTraceEvent.task_id)
+            .where(AgentTask.workspace_id == workspace["id"])
             .order_by(AgentTraceEvent.created_at.desc(), AgentTraceEvent.id.desc())
             .limit(8)
         ).all()

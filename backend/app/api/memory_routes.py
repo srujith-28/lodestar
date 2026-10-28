@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.memory_schemas import MemoryCreate, MemoryResponse, MemorySearchRequest, MemoryUpdate
 from app.database import get_db
-from app.core.security import require_authenticated
+from app.core.security import WorkspaceContext, require_workspace_access
 from app.models import Memory, utc_now
 from app.services.memory_search import search_memory_rows
 
@@ -18,7 +18,7 @@ from app.services.memory_search import search_memory_rows
 router = APIRouter(
     prefix="/api/memories",
     tags=["memory"],
-    dependencies=[Depends(require_authenticated)],
+    dependencies=[Depends(require_workspace_access)],
 )
 Result = TypeVar("Result")
 
@@ -35,8 +35,10 @@ def _database_operation(db: Session, operation: Callable[[Session], Result]) -> 
         ) from None
 
 
-def _memory_or_404(db: Session, memory_id: int) -> Memory:
-    memory = db.get(Memory, memory_id)
+def _memory_or_404(db: Session, memory_id: int, workspace_id: str) -> Memory:
+    memory = db.scalar(
+        select(Memory).where(Memory.id == memory_id, Memory.workspace_id == workspace_id)
+    )
     if memory is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -52,23 +54,33 @@ def _memory_sort():
 @router.post("/search", response_model=list[MemoryResponse])
 def search_memories(
     request: MemorySearchRequest,
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> list[MemoryResponse]:
     """Search locally using a private request body; no external service is used."""
     memories = _database_operation(
         db,
-        lambda session: search_memory_rows(session, request.q, request.limit),
+        lambda session: search_memory_rows(
+            session, request.q, request.limit, workspace_id=workspace["id"]
+        ),
     )
     return [MemoryResponse.model_validate(memory) for memory in memories]
 
 
 @router.get("", response_model=list[MemoryResponse])
 def list_memories(
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[MemoryResponse]:
-    statement = select(Memory).order_by(*_memory_sort()).offset(offset).limit(limit)
+    statement = (
+        select(Memory)
+        .where(Memory.workspace_id == workspace["id"])
+        .order_by(*_memory_sort())
+        .offset(offset)
+        .limit(limit)
+    )
     memories = _database_operation(db, lambda session: session.scalars(statement).all())
     return [MemoryResponse.model_validate(memory) for memory in memories]
 
@@ -76,10 +88,11 @@ def list_memories(
 @router.post("", response_model=MemoryResponse, status_code=status.HTTP_201_CREATED)
 def create_memory(
     request: MemoryCreate,
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> MemoryResponse:
     def save(session: Session) -> Memory:
-        memory = Memory(**request.model_dump())
+        memory = Memory(workspace_id=workspace["id"], **request.model_dump())
         session.add(memory)
         session.commit()
         session.refresh(memory)
@@ -92,9 +105,12 @@ def create_memory(
 @router.get("/{memory_id}", response_model=MemoryResponse)
 def get_memory(
     memory_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> MemoryResponse:
-    memory = _database_operation(db, lambda session: _memory_or_404(session, memory_id))
+    memory = _database_operation(
+        db, lambda session: _memory_or_404(session, memory_id, workspace["id"])
+    )
     return MemoryResponse.model_validate(memory)
 
 
@@ -102,10 +118,11 @@ def get_memory(
 def update_memory(
     request: MemoryUpdate,
     memory_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> MemoryResponse:
     def update(session: Session) -> Memory:
-        memory = _memory_or_404(session, memory_id)
+        memory = _memory_or_404(session, memory_id, workspace["id"])
         for field, value in request.model_dump().items():
             setattr(memory, field, value)
         memory.updated_at = utc_now()
@@ -124,10 +141,11 @@ def update_memory(
 )
 def delete_memory(
     memory_id: int = Path(gt=0),
+    workspace: WorkspaceContext = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ) -> Response:
     def delete(session: Session) -> None:
-        memory = _memory_or_404(session, memory_id)
+        memory = _memory_or_404(session, memory_id, workspace["id"])
         session.delete(memory)
         session.commit()
 

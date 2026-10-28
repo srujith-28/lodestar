@@ -84,8 +84,16 @@ function NavigationIcon({ page }: { page: PageId }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d={paths[page]} stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
 
-function WorkspaceApp({ onLogout }: { onLogout: () => Promise<void> }) {
+function WorkspaceApp({
+  onLogout,
+  workspaceType,
+}: {
+  onLogout: () => Promise<void>;
+  workspaceType: "personal" | "guest";
+}) {
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
   const [status, setStatus] = useState<HealthStatus>("loading");
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -106,6 +114,23 @@ function WorkspaceApp({ onLogout }: { onLogout: () => Promise<void> }) {
       await onLogout();
     } catch (cause) {
       setLogoutError(cause instanceof Error ? cause.message : "Could not end the session.");
+    }
+  }
+
+  async function resetGuestWorkspace() {
+    if (workspaceType !== "guest" || resetBusy) return;
+    if (!window.confirm("Reset this isolated sample workspace? Your guest-created memories, tasks, traces, and skills will be deleted and the labeled sample will be restored.")) return;
+    setResetBusy(true);
+    setResetError(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/demo/reset`, { method: "POST" });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(typeof payload?.detail === "string" ? payload.detail : "The sample workspace could not be reset.");
+      window.location.reload();
+    } catch (cause) {
+      setResetError(cause instanceof Error ? cause.message : "The sample workspace could not be reset.");
+    } finally {
+      setResetBusy(false);
     }
   }
 
@@ -334,6 +359,7 @@ function WorkspaceApp({ onLogout }: { onLogout: () => Promise<void> }) {
         </nav>
 
         <div className="sidebar-bottom">
+          {workspaceType === "guest" && <div className="guest-workspace-note"><strong>Sample workspace</strong><span>Fictional records · isolated session</span></div>}
           <div className="sidebar-health-row">
             <span className={`health-indicator ${status}`} aria-hidden="true" />
             <span><strong>{statusLabel}</strong><small>Local API + database</small></span>
@@ -348,7 +374,7 @@ function WorkspaceApp({ onLogout }: { onLogout: () => Promise<void> }) {
           <button className="mobile-menu-button" type="button" aria-label="Open navigation" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}>
             <span /><span /><span />
           </button>
-          <div className="workspace-breadcrumb"><span>Workspace</span><span aria-hidden="true">/</span><strong>{activeLabel}</strong></div>
+          <div className="workspace-breadcrumb"><span>Workspace</span><span aria-hidden="true">/</span><strong>{activeLabel}</strong>{workspaceType === "guest" && <span className="workspace-type-chip">GUEST PREVIEW</span>}</div>
           <div className="topbar-status">
             <button className={`topbar-status-chip local ${status}`} type="button" onClick={() => void checkHealth()} title={error ?? "Refresh local API and database status"}>
               <span className={`health-indicator ${status}`} aria-hidden="true" />
@@ -358,10 +384,12 @@ function WorkspaceApp({ onLogout }: { onLogout: () => Promise<void> }) {
               <span className="provider-status-dot" aria-hidden="true" />
               <span>{providerLabel}</span>
             </span>
-            <button className="logout-button" type="button" onClick={() => void submitLogout()}>Log out</button>
+            {workspaceType === "guest" && <button className="logout-button guest-reset-button" type="button" onClick={() => void resetGuestWorkspace()} disabled={resetBusy}>{resetBusy ? "Resetting…" : "Reset sample"}</button>}
+            <button className="logout-button" type="button" onClick={() => void submitLogout()}>{workspaceType === "guest" ? "Exit demo" : "Log out"}</button>
           </div>
         </header>
         {logoutError && <p className="logout-error" role="alert">{logoutError}</p>}
+        {resetError && <p className="logout-error" role="alert">{resetError}</p>}
 
         <div className="page-content">
           {activePage === "home" && (
@@ -462,6 +490,8 @@ type AuthState = "checking" | "setup_required" | "login_required" | "authenticat
 type AuthSession = {
   configured: boolean;
   authenticated: boolean;
+  demo_enabled: boolean;
+  workspace_type: "personal" | "guest" | null;
 };
 
 function AuthGate() {
@@ -469,6 +499,9 @@ function AuthGate() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [demoEnabled, setDemoEnabled] = useState(false);
+  const [privateWorkspaceEnabled, setPrivateWorkspaceEnabled] = useState(false);
+  const [workspaceType, setWorkspaceType] = useState<"personal" | "guest" | null>(null);
 
   const refreshSession = useCallback(async () => {
     setState("checking");
@@ -477,7 +510,10 @@ function AuthGate() {
       const sessionResponse = await fetch(`${API_BASE_URL}/api/auth/session`);
       if (!sessionResponse.ok) throw new Error("The authentication service could not be reached.");
       const session = (await sessionResponse.json()) as AuthSession;
-      if (!session.configured) {
+      setDemoEnabled(session.demo_enabled);
+      setPrivateWorkspaceEnabled(session.configured);
+      setWorkspaceType(session.workspace_type);
+      if (!session.configured && !session.demo_enabled) {
         setCsrfToken(null);
         setState("setup_required");
         return;
@@ -521,9 +557,28 @@ function AuthGate() {
       }
       setCsrfToken(payload.csrf_token);
       setPassword("");
+      setWorkspaceType("personal");
       setState("authenticated");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Sign-in failed. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startGuestDemo() {
+    if (!demoEnabled || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/auth/demo`, { method: "POST" });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(typeof payload?.detail === "string" ? payload.detail : `Demo could not start (${response.status}).`);
+      setCsrfToken(payload.csrf_token);
+      setWorkspaceType("guest");
+      setState("authenticated");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The sample workspace could not be prepared.");
     } finally {
       setBusy(false);
     }
@@ -541,7 +596,7 @@ function AuthGate() {
     }
   }
 
-  if (state === "authenticated") return <WorkspaceApp onLogout={logout} />;
+  if (state === "authenticated") return <WorkspaceApp onLogout={logout} workspaceType={workspaceType ?? "personal"} />;
 
   return (
     <main className="auth-shell">
@@ -572,15 +627,20 @@ function AuthGate() {
           </>
         ) : (
           <>
-            <h1 id="auth-title">Welcome back.</h1>
-            <p className="auth-copy">Sign in to open your private Lodestar workspace.</p>
-            <form className="auth-form" onSubmit={submitLogin}>
-              <label htmlFor="auth-password">Demo password</label>
-              <input id="auth-password" type="password" autoComplete="current-password" minLength={12} maxLength={256} value={password} onChange={(event) => setPassword(event.target.value)} required disabled={busy} />
-              {error && <p className="auth-error" role="alert">{error}</p>}
-              <button className="button-primary auth-submit" type="submit" disabled={busy || password.length < 12}>{busy ? "Signing in…" : "Sign in"}</button>
-            </form>
-            <p className="auth-footnote">One private demo account · Your password stays on the backend.</p>
+            {demoEnabled && <div className="guest-entry-card"><p className="eyebrow"><span className="eyebrow-line" /> JUDGE PREVIEW</p><h1 id="auth-title">Explore Lodestar.</h1><p className="auth-copy">Open an isolated sample workspace. It contains clearly labeled fictional project context and can be reset at any time.</p><button className="button-primary auth-submit explore-demo-button" type="button" onClick={() => void startGuestDemo()} disabled={busy}>{busy ? "Preparing sample workspace…" : "Explore demo"}</button><p className="auth-footnote">No account or password · Your sample workspace is separate from private data</p></div>}
+            {error && <p className="auth-error" role="alert">{error}</p>}
+            {demoEnabled && <div className="auth-divider"><span>PRIVATE WORKSPACE</span></div>}
+            {state === "login_required" && privateWorkspaceEnabled && (
+              <>
+                {!demoEnabled && <><h1 id="auth-title">Welcome back.</h1><p className="auth-copy">Sign in to open your private Lodestar workspace.</p></>}
+                <form className="auth-form" onSubmit={submitLogin}>
+                  <label htmlFor="auth-password">Demo password</label>
+                  <input id="auth-password" type="password" autoComplete="current-password" minLength={12} maxLength={256} value={password} onChange={(event) => setPassword(event.target.value)} required disabled={busy} />
+                  <button className="button-primary auth-submit" type="submit" disabled={busy || password.length < 12}>{busy ? "Signing in…" : "Sign in"}</button>
+                </form>
+                <p className="auth-footnote">One private workspace · Your password stays on the backend.</p>
+              </>
+            )}
           </>
         )}
         <footer className="auth-footer"><span>Local-first</span><span>·</span><span>Memory is user-controlled</span></footer>

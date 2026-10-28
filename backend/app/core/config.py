@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     database_url: SecretStr = SecretStr("sqlite:///./lodestar.db")
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
-    # Single-user demo authentication. Both values must be configured together.
+    # Private single-user auth needs both values; guest-only mode needs the signing secret.
     lodestar_auth_password: SecretStr | None = None
     lodestar_session_secret: SecretStr | None = None
     login_rate_limit_max_attempts: int = Field(
@@ -46,6 +46,13 @@ class Settings(BaseSettings):
         le=86_400,
     )
     trusted_proxy_cidrs: str = ""
+    guest_demo_enabled: bool = False
+    guest_session_rate_limit_max_attempts: int = Field(default=40, ge=1, le=1_000)
+    guest_data_retention_days: int = Field(default=7, ge=1, le=3_650)
+    guest_api_rate_limit_max_requests: int = Field(default=120, ge=10, le=10_000)
+    guest_api_rate_limit_window_seconds: int = Field(default=60, ge=10, le=3_600)
+    guest_provider_calls_per_workspace_per_day: int = Field(default=8, ge=0, le=1_000)
+    guest_provider_calls_global_per_day: int = Field(default=40, ge=0, le=10_000)
 
     # The key stays server-side and is masked in settings representations.
     nebius_api_key: SecretStr | None = None
@@ -109,13 +116,16 @@ class Settings(BaseSettings):
             raise ValueError("APP_ENV must be either 'development' or 'production'.")
         has_password = self.lodestar_auth_password is not None
         has_secret = self.lodestar_session_secret is not None
-        if has_password != has_secret:
+        guest_only_auth = self.guest_demo_enabled and has_secret and not has_password
+        if has_password != has_secret and not guest_only_auth:
             raise ValueError(
                 "LODESTAR_AUTH_PASSWORD and LODESTAR_SESSION_SECRET must be configured together."
             )
-        if self.app_env == "production" and not (has_password and has_secret):
+        if self.guest_demo_enabled and not has_secret:
+            raise ValueError("Guest demo access requires LODESTAR_SESSION_SECRET.")
+        if self.app_env == "production" and not (has_secret and (has_password or self.guest_demo_enabled)):
             raise ValueError(
-                "Production requires LODESTAR_AUTH_PASSWORD and LODESTAR_SESSION_SECRET."
+                "Production requires LODESTAR_SESSION_SECRET and either LODESTAR_AUTH_PASSWORD or GUEST_DEMO_ENABLED."
             )
         database_scheme = urlsplit(self.database_url.get_secret_value()).scheme.lower()
         if self.app_env == "production" and database_scheme not in {

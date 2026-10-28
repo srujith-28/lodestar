@@ -3,6 +3,7 @@ import { apiFetch as fetch } from "./api";
 
 type AgentTask = {
   id: number;
+  is_sample: boolean;
   task_input: string;
   status: "pending" | "running" | "completed" | "failed" | "awaiting_approval";
   created_at: string;
@@ -200,7 +201,7 @@ export function HomeView({
               {overview.recent_tasks.map((task) => (
                 <li className="task-list-row" key={task.id}>
                   <button className="task-row-button" type="button" onClick={() => onNavigate("history", task.id)} aria-label={`Open task ${task.id} in history`}>
-                    <span className="task-row-copy"><strong>{task.task_input}</strong><time dateTime={task.created_at}>{formatTime(task.created_at)}</time></span>
+                    <span className="task-row-copy"><strong>{task.task_input}</strong><span className="task-row-meta">{task.is_sample && <span className="sample-data-badge">Sample data</span>}<time dateTime={task.created_at}>{formatTime(task.created_at)}</time></span></span>
                     <span className={`status-badge ${task.status}`}>{task.status.replaceAll("_", " ")}</span>
                   </button>
                 </li>

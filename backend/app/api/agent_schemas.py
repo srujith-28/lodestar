@@ -106,6 +106,7 @@ class AgentTaskResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    is_sample: bool = False
     skill_id: int | None
     task_input: str
     status: TaskStatus

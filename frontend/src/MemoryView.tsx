@@ -3,6 +3,7 @@ import { apiFetch as fetch } from "./api";
 
 type MemoryItem = {
   id: number;
+  is_sample: boolean;
   content: string;
   category: string;
   source: string;
@@ -275,6 +276,7 @@ export function MemoryView({ apiBaseUrl }: MemoryViewProps) {
               <article className="memory-card" key={memory.id}>
                 <div className="memory-card-meta">
                   <span className="memory-category">{memory.category}</span>
+                  {memory.is_sample && <span className="sample-data-badge">Sample data</span>}
                   <span>From {memory.source}</span>
                 </div>
                 <p className="memory-content">{memory.content}</p>
