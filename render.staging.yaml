@@ -1,0 +1,53 @@
+services:
+  - type: web
+    name: lodestar-staging
+    runtime: docker
+    plan: free
+    branch: staging/guest-demo
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: "off"
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_NAME
+        value: Lodestar Staging
+      - key: CORS_ORIGINS
+        fromService:
+          type: web
+          name: lodestar-staging
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: DATABASE_URL
+        fromDatabase:
+          name: lodestar-staging-db
+          property: connectionString
+      - key: LODESTAR_AUTH_PASSWORD
+        sync: false
+      - key: LODESTAR_SESSION_SECRET
+        generateValue: true
+      - key: LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+        value: "5"
+      - key: LOGIN_RATE_LIMIT_WINDOW_SECONDS
+        value: "900"
+      - key: GUEST_DEMO_ENABLED
+        value: "true"
+      - key: GUEST_SESSION_RATE_LIMIT_MAX_ATTEMPTS
+        value: "40"
+      - key: GUEST_DATA_RETENTION_DAYS
+        value: "7"
+      - key: GUEST_API_RATE_LIMIT_MAX_REQUESTS
+        value: "120"
+      - key: GUEST_API_RATE_LIMIT_WINDOW_SECONDS
+        value: "60"
+      - key: GUEST_PROVIDER_CALLS_PER_WORKSPACE_PER_DAY
+        value: "8"
+      - key: GUEST_PROVIDER_CALLS_GLOBAL_PER_DAY
+        value: "40"
+      # Set only after the staging proxy's address and header sanitization are verified.
+
+databases:
+  - name: lodestar-staging-db
+    databaseName: lodestar_staging
+    user: lodestar_staging
+    plan: free

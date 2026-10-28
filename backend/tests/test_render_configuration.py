@@ -35,3 +35,41 @@ def test_render_blueprint_defines_one_web_service_and_persistent_database() -> N
     # Keep the raw socket peer visible to app-level trusted-proxy validation;
     # Uvicorn must not rewrite request.client from untrusted forwarding headers.
     assert "--no-proxy-headers" in dockerfile
+
+
+def test_staging_blueprint_uses_separate_resources_and_staging_branch() -> None:
+    production = yaml.safe_load((REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8"))
+    staging = yaml.safe_load(
+        (REPOSITORY_ROOT / "render.staging.yaml").read_text(encoding="utf-8")
+    )
+
+    production_service = production["services"][0]
+    production_database = production["databases"][0]
+    service = staging["services"][0]
+    database = staging["databases"][0]
+    env_vars = {item["key"]: item for item in service["envVars"]}
+
+    assert service["name"] == "lodestar-staging"
+    assert service["runtime"] == "docker"
+    assert service["branch"] == "staging/guest-demo"
+    assert service["autoDeployTrigger"] == "off"
+    assert service["dockerfilePath"] == "./Dockerfile"
+    assert service["dockerContext"] == "."
+    assert service["healthCheckPath"] == "/health"
+    assert service["name"] != production_service["name"]
+    assert database["name"] == "lodestar-staging-db"
+    assert database["databaseName"] == "lodestar_staging"
+    assert database["name"] != production_database["name"]
+    assert env_vars["DATABASE_URL"]["fromDatabase"] == {
+        "name": "lodestar-staging-db",
+        "property": "connectionString",
+    }
+    assert env_vars["CORS_ORIGINS"]["fromService"] == {
+        "type": "web",
+        "name": "lodestar-staging",
+        "envVarKey": "RENDER_EXTERNAL_URL",
+    }
+    assert env_vars["LODESTAR_SESSION_SECRET"]["generateValue"] is True
+    assert env_vars["LODESTAR_AUTH_PASSWORD"]["sync"] is False
+    assert "NEBIUS_API_KEY" not in env_vars
+    assert "TRUSTED_PROXY_CIDRS" not in env_vars

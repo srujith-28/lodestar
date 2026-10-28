@@ -74,6 +74,14 @@ The root `render.yaml` and `Dockerfile` describe one Render Docker web service. 
 6. If you later choose to enable Nebius, add `NEBIUS_API_KEY` through the Render service's Environment page only. Keep it out of `render.yaml`, Git, and Vite variables. Add the existing selected model ID only after confirming that it is available for that account. Provider status reports configuration; it does not itself verify inference.
 7. Before sharing the public URL, configure and test trusted per-client edge rate limiting for both `POST /api/auth/login` (at least five attempts per 15 minutes with HTTP 429) and `POST /api/auth/demo` (limit session creation). Render's built-in DDoS protection is not per-login credential-stuffing protection. Render's [current DDoS guidance](https://render.com/articles/how-render-handles-ddos-attacks) says requests pass through Cloudflare and Render load balancers and the service sees a proxy IP by default. `render.yaml` intentionally leaves `TRUSTED_PROXY_CIDRS` unset: Uvicorn proxy-header rewriting is disabled in the Docker command, Lodestar ignores forwarding headers, and the fallback limiter keys by the direct socket peer. Visitors reaching the same proxy peer may share the login and guest-bootstrap buckets; per-client application throttling is not verified on Render. Do not guess proxy CIDRs. Until a deployment-level limit and trusted client-identification path are verified, keep the demo link private. The current Blueprint contains no login-specific or guest-bootstrap edge rate-limit rule.
 
+### Isolated staging Blueprint
+
+`render.staging.yaml` defines a separate Docker web service named `lodestar-staging` and a new PostgreSQL database named `lodestar-staging-db` (`lodestar_staging`). It pins the service to the `staging/guest-demo` branch, links `DATABASE_URL` only to the staging database, and derives `CORS_ORIGINS` from the staging service's own HTTPS `RENDER_EXTERNAL_URL`. Its session signing secret is generated independently, and the private password is entered as an unsynchronized staging value. It does not reference the production resources in `render.yaml`, include a Nebius key, configure trusted proxy CIDRs, or add a paid cleanup scheduler. Automatic deploys after creation are disabled; applying the Blueprint still provisions its initial resources and starts an initial deployment.
+
+To prepare staging in the Render Dashboard, choose **New → Blueprint**, connect the Lodestar repository, select branch `staging/guest-demo`, and set **Blueprint Path** to `render.staging.yaml`. The selected branch determines which code Render checks out; the Blueprint Path selects the YAML file. Before applying it, confirm the review lists exactly `lodestar-staging` and `lodestar-staging-db`, that the service uses the Docker runtime, and that `DATABASE_URL` references `lodestar-staging-db`. Cancel if the names or database reference differ. Never select the root `render.yaml` for staging: it names the production resources `lodestar-demo` and `lodestar-demo-db`.
+
+Enter a unique staging `LODESTAR_AUTH_PASSWORD` privately and allow Render to generate a separate `LODESTAR_SESSION_SECRET`; do not copy values from production or local `.env`. The staging CORS origin is self-referenced from its assigned HTTPS URL. The staging database is separate and starts empty; startup applies the additive workspace migration to that database only. Verify the staging health check and guest isolation before sharing its URL. Rate limiting by visitor IP and guest-data cleanup still require separate staging verification and configuration.
+
 ### Guest data retention job
 
 Guest data is eligible for deletion after the maximum eight-hour session lifetime plus `GUEST_DATA_RETENTION_DAYS` (default `7`). The cleanup command atomically claims expired guest workspaces and deletes their memories, tasks, traces, skills, sessions, and per-workspace usage counters in one database transaction. It never selects the `personal` workspace or the shared global provider counter. Existing guest rows without a retention deadline are given a complete session-plus-retention grace period the first time the job runs. Cleanup is idempotent and safe for overlapping invocations; a failed transaction leaves the workspace and its data intact.
@@ -204,7 +212,8 @@ frontend/
   package.json         Pinned frontend dependencies and scripts
 .env.example           Safe local and provider setting placeholders
 Dockerfile             Multi-stage frontend build and production FastAPI image
-render.yaml            Free Render web-service and PostgreSQL Blueprint
+render.yaml            Production Render web-service and PostgreSQL Blueprint
+render.staging.yaml    Isolated staging Blueprint for staging/guest-demo
 .dockerignore          Excludes secrets, local databases, and generated artifacts from image builds
 ```
 
