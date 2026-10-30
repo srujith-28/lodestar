@@ -3,6 +3,10 @@
 from pathlib import Path
 
 import yaml
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import make_url
+
+from app.core.config import Settings
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -37,16 +41,14 @@ def test_render_blueprint_defines_one_web_service_and_persistent_database() -> N
     assert "--no-proxy-headers" in dockerfile
 
 
-def test_staging_blueprint_uses_separate_resources_and_staging_branch() -> None:
+def test_staging_blueprint_uses_external_database_and_staging_branch() -> None:
     production = yaml.safe_load((REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8"))
-    staging = yaml.safe_load(
-        (REPOSITORY_ROOT / "render.staging.yaml").read_text(encoding="utf-8")
-    )
+    staging_text = (REPOSITORY_ROOT / "render.staging.yaml").read_text(encoding="utf-8")
+    staging = yaml.safe_load(staging_text)
 
     production_service = production["services"][0]
     production_database = production["databases"][0]
     service = staging["services"][0]
-    database = staging["databases"][0]
     env_vars = {item["key"]: item for item in service["envVars"]}
 
     assert service["name"] == "lodestar-staging"
@@ -57,13 +59,11 @@ def test_staging_blueprint_uses_separate_resources_and_staging_branch() -> None:
     assert service["dockerContext"] == "."
     assert service["healthCheckPath"] == "/health"
     assert service["name"] != production_service["name"]
-    assert database["name"] == "lodestar-staging-db"
-    assert database["databaseName"] == "lodestar_staging"
-    assert database["name"] != production_database["name"]
-    assert env_vars["DATABASE_URL"]["fromDatabase"] == {
-        "name": "lodestar-staging-db",
-        "property": "connectionString",
-    }
+    assert "databases" not in staging
+    assert env_vars["DATABASE_URL"] == {"key": "DATABASE_URL", "sync": False}
+    assert "fromDatabase" not in staging_text
+    assert production_service["name"] not in staging_text
+    assert production_database["name"] not in staging_text
     assert env_vars["CORS_ORIGINS"]["fromService"] == {
         "type": "web",
         "name": "lodestar-staging",
@@ -73,3 +73,21 @@ def test_staging_blueprint_uses_separate_resources_and_staging_branch() -> None:
     assert env_vars["LODESTAR_AUTH_PASSWORD"]["sync"] is False
     assert "NEBIUS_API_KEY" not in env_vars
     assert "TRUSTED_PROXY_CIDRS" not in env_vars
+
+
+def test_neon_style_postgresql_url_keeps_ssl_query_parameters() -> None:
+    url = "postgresql://lodestar_user:placeholder@ep-example.neon.tech/neondb?sslmode=require"
+    settings = Settings(_env_file=None, database_url=url)
+
+    assert settings.database_url.get_secret_value() == url
+    parsed_url = make_url(settings.database_url.get_secret_value())
+    dialect = postgresql.dialect()
+    _, connect_parameters = dialect.create_connect_args(parsed_url)
+    requirements = (REPOSITORY_ROOT / "backend" / "requirements.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert dialect.name == "postgresql"
+    assert dialect.driver == "psycopg2"
+    assert connect_parameters["sslmode"] == "require"
+    assert "psycopg2-binary==2.9.10" in requirements
